@@ -104,12 +104,46 @@ def _club_limit_ok(team_series: pd.Series, club_limit: int = 3) -> bool:
     return int(team_series.value_counts().max()) <= club_limit
 
 
+def _get_limited_incoming_pool(
+    predictions_df: pd.DataFrame,
+    current_names: set[str],
+    position: str,
+    max_affordable_price: float | None = None,
+    top_n: int = 15,
+) -> pd.DataFrame:
+    """
+    Build a narrowed incoming pool for transfer search.
+
+    This keeps the transfer search fast enough for deployment by only
+    considering the strongest candidates per position.
+    """
+    pool = predictions_df[
+        (predictions_df["position"] == position)
+        & (~predictions_df["name"].isin(current_names))
+    ].copy()
+
+    if max_affordable_price is not None:
+        pool = pool[pool["price_m"] <= max_affordable_price].copy()
+
+    if pool.empty:
+        return pool
+
+    # Prefer stronger predicted players, then cheaper tie-break
+    pool = pool.sort_values(
+        ["predicted_points", "price_m"],
+        ascending=[False, True],
+    ).head(top_n)
+
+    return pool.reset_index(drop=True)
+
+
 def recommend_best_one_transfer(
     current_squad_df: pd.DataFrame,
     predictions_df: pd.DataFrame,
     money_in_bank: float = 0.0,
     starting_names: Iterable[str] | None = None,
     verbose: bool = True,
+    top_n_per_position: int = 20,
 ) -> pd.DataFrame:
     """
     Recommend the best single transfer based on predicted point gain.
@@ -119,7 +153,9 @@ def recommend_best_one_transfer(
 
     _log("[1-transfer] Validating current squad...", verbose)
     valid, reasons, squad_cost, total_budget_used = validate_full_squad(
-        current_squad_df, money_in_bank=money_in_bank
+        current_squad_df,
+        money_in_bank=money_in_bank,
+        enforce_budget=False,
     )
 
     if not valid:
@@ -148,11 +184,13 @@ def recommend_best_one_transfer(
 
         max_affordable_price = outgoing_price + money_in_bank
 
-        candidate_incomings = predictions_df[
-            (predictions_df["position"] == outgoing_position)
-            & (~predictions_df["name"].isin(current_names))
-            & (predictions_df["price_m"] <= max_affordable_price)
-        ].copy()
+        candidate_incomings = _get_limited_incoming_pool(
+            predictions_df=predictions_df,
+            current_names=current_names,
+            position=outgoing_position,
+            max_affordable_price=max_affordable_price,
+            top_n=top_n_per_position,
+        )
 
         for _, incoming in candidate_incomings.iterrows():
             incoming_name = incoming["name"]
@@ -198,6 +236,10 @@ def recommend_best_one_transfer(
         return pd.DataFrame()
 
     recommendations_df = pd.DataFrame(recommendations)
+    recommendations_df = recommendations_df.drop_duplicates(
+        subset=["player_out", "player_in"]
+    )
+
     recommendations_df = recommendations_df.sort_values(
         ["predicted_points_gain", "player_in_predicted_points"],
         ascending=[False, False],
@@ -213,16 +255,22 @@ def recommend_best_two_transfers(
     money_in_bank: float = 0.0,
     starting_names: Iterable[str] | None = None,
     verbose: bool = True,
+    top_n_per_position: int = 12,
 ) -> pd.DataFrame:
     """
     Recommend the best two-transfer combination.
+
+    This version is deployment-safe because it narrows the incoming
+    candidate pools before evaluating pairs.
     """
     if starting_names is None:
         starting_names = []
 
     _log("[2-transfer] Validating current squad...", verbose)
     valid, reasons, squad_cost, total_budget_used = validate_full_squad(
-        current_squad_df, money_in_bank=money_in_bank
+        current_squad_df,
+        money_in_bank=money_in_bank,
+        enforce_budget=False,
     )
 
     if not valid:
@@ -243,7 +291,7 @@ def recommend_best_two_transfers(
     total_pairs = len(outgoing_pairs)
 
     for pair_idx, (i, j) in enumerate(outgoing_pairs, start=1):
-        if pair_idx % 50 == 0 or pair_idx == total_pairs:
+        if pair_idx % 20 == 0 or pair_idx == total_pairs:
             _log(f"[2-transfer] Outgoing pair progress: {pair_idx}/{total_pairs}", verbose)
 
         outgoing1 = current_squad_list[i]
@@ -266,15 +314,25 @@ def recommend_best_two_transfers(
 
         max_affordable_price = out1_price + out2_price + money_in_bank
 
-        incoming_pool1 = predictions_df[
-            (predictions_df["position"] == out1_pos)
-            & (~predictions_df["name"].isin(current_names))
-        ].copy()
+        # Limit both incoming pools aggressively for deployment stability
+        incoming_pool1 = _get_limited_incoming_pool(
+            predictions_df=predictions_df,
+            current_names=current_names,
+            position=out1_pos,
+            max_affordable_price=max_affordable_price,
+            top_n=top_n_per_position,
+        )
 
-        incoming_pool2 = predictions_df[
-            (predictions_df["position"] == out2_pos)
-            & (~predictions_df["name"].isin(current_names))
-        ].copy()
+        incoming_pool2 = _get_limited_incoming_pool(
+            predictions_df=predictions_df,
+            current_names=current_names,
+            position=out2_pos,
+            max_affordable_price=max_affordable_price,
+            top_n=top_n_per_position,
+        )
+
+        if incoming_pool1.empty or incoming_pool2.empty:
+            continue
 
         incoming_list1 = incoming_pool1.to_dict("records")
         incoming_list2 = incoming_pool2.to_dict("records")
@@ -336,6 +394,10 @@ def recommend_best_two_transfers(
         return pd.DataFrame()
 
     recommendations_df = pd.DataFrame(recommendations)
+    recommendations_df = recommendations_df.drop_duplicates(
+        subset=["player_out_1", "player_out_2", "player_in_1", "player_in_2"]
+    )
+
     recommendations_df = recommendations_df.sort_values(
         ["predicted_points_gain"],
         ascending=[False],
@@ -387,6 +449,7 @@ def inspect_transfer_logic(
     valid, reasons, squad_cost, total_budget_used = validate_full_squad(
         current_squad_df,
         money_in_bank=money_in_bank,
+        enforce_budget=False,
     )
 
     print("\nCurrent squad valid:", valid)
