@@ -370,6 +370,17 @@ def build_gw1_candidate_pool(
 
     for col in fallback_cols:
         median_col = f"{col}_position_median"
+
+        if col not in candidate_pool.columns:
+            candidate_pool[col] = pd.NA
+
+        if median_col not in candidate_pool.columns:
+            if col in position_medians.columns:
+                fallback_map = position_medians.set_index("position")[col].to_dict()
+                candidate_pool[median_col] = candidate_pool["position"].map(fallback_map)
+            else:
+                candidate_pool[median_col] = pd.NA
+
         candidate_pool[col] = pd.to_numeric(candidate_pool[col], errors="coerce")
         candidate_pool[median_col] = pd.to_numeric(candidate_pool[median_col], errors="coerce")
         candidate_pool[col] = candidate_pool[col].fillna(candidate_pool[median_col])
