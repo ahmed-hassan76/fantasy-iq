@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import streamlit as st
 import pandas as pd
-
+from src.api import clear_api_cache
 from src.predict import build_predictions_table
 from src.optimizer import build_optimized_squad_from_predictions, summarize_squad
 from src.gw1_builder import build_gw1_hybrid_outputs
@@ -603,10 +603,14 @@ def format_one_transfer_table(df: pd.DataFrame) -> pd.DataFrame:
     }
     temp = temp.rename(columns=rename_map)
 
+    # Prices should always display with 1 decimal in FPL format
+    for col in ["Out Price", "In Price"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(1)
+
+    # Prediction / budget values can stay at 2 decimals
     for col in [
-        "Out Price",
         "Out Predicted Points",
-        "In Price",
         "In Predicted Points",
         "Predicted Points Gain",
         "Budget Change",
@@ -667,8 +671,11 @@ def format_gw1_squad_table(df: pd.DataFrame) -> pd.DataFrame:
     if "Matched Previous Season" in temp.columns:
         temp["Matched Previous Season"] = temp["Matched Previous Season"].map({1: "Yes", 0: "No"})
 
+    # Price should always display with 1 decimal in FPL format
+    if "Price" in temp.columns:
+        temp["Price"] = pd.to_numeric(temp["Price"], errors="coerce").round(1)
+
     for col in [
-        "Price",
         "Hybrid Score",
         "Previous Season Avg Points",
         "Value Efficiency",
@@ -946,6 +953,7 @@ st.sidebar.markdown("---")
 
 if st.sidebar.button("Refresh Live Data"):
     st.cache_data.clear()
+    clear_api_cache()
     st.session_state["predictions_df"] = None
     st.session_state["optimized_squad_df"] = None
 

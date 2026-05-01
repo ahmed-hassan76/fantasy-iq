@@ -41,13 +41,41 @@ def _emit_progress(progress_callback: ProgressCallback | None, value: float, mes
         progress_callback(max(0.0, min(1.0, value)), message)
 
 
-def _get_json(url: str, cache_path: Path | None = None, use_cache: bool = True) -> Any:
+def clear_api_cache() -> None:
+    """
+    Clear saved on-disk API cache files.
+    Useful when the app needs to force a truly fresh live pull.
+    """
+    if BOOTSTRAP_CACHE_FILE.exists():
+        BOOTSTRAP_CACHE_FILE.unlink()
+
+    if FIXTURES_CACHE_FILE.exists():
+        FIXTURES_CACHE_FILE.unlink()
+
+    if ELEMENT_SUMMARY_CACHE_DIR.exists():
+        for file in ELEMENT_SUMMARY_CACHE_DIR.glob("*.json"):
+            try:
+                file.unlink()
+            except OSError:
+                pass
+
+
+def _get_json(
+    url: str,
+    cache_path: Path | None = None,
+    use_cache: bool = True,
+    save_cache: bool = True,
+) -> Any:
+    """
+    Fetch JSON from a live endpoint.
+    Falls back to disk cache only if live fetch fails and use_cache=True.
+    """
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         payload = response.json()
 
-        if cache_path is not None:
+        if save_cache and cache_path is not None:
             _save_json(cache_path, payload)
 
         return payload
@@ -64,6 +92,7 @@ def fetch_bootstrap_static(use_cache: bool = True) -> dict[str, Any]:
         url=BOOTSTRAP_STATIC_URL,
         cache_path=BOOTSTRAP_CACHE_FILE,
         use_cache=use_cache,
+        save_cache=True,
     )
     if not isinstance(payload, dict):
         raise FPLApiError("bootstrap-static response is not a JSON object.")
@@ -75,6 +104,7 @@ def fetch_fixtures(use_cache: bool = True) -> list[dict[str, Any]]:
         url=FIXTURES_URL,
         cache_path=FIXTURES_CACHE_FILE,
         use_cache=use_cache,
+        save_cache=True,
     )
     if not isinstance(payload, list):
         raise FPLApiError("fixtures response is not a JSON list.")
@@ -87,6 +117,7 @@ def fetch_element_summary(player_id: int, use_cache: bool = True) -> dict[str, A
         url=ELEMENT_SUMMARY_URL.format(player_id=player_id),
         cache_path=cache_path,
         use_cache=use_cache,
+        save_cache=True,
     )
     if not isinstance(payload, dict):
         raise FPLApiError(f"element-summary response for player {player_id} is not a JSON object.")
@@ -101,7 +132,10 @@ def get_players_df(use_cache: bool = True) -> pd.DataFrame:
         return players
 
     players["position"] = players["element_type"].map(POSITION_MAP)
-    players["price_m"] = players["now_cost"] / 10.0
+
+    # Correct FPL price conversion: now_cost is in tenths
+    players["price_m"] = pd.to_numeric(players["now_cost"], errors="coerce") / 10.0
+
     players["full_name"] = (
         players["first_name"].fillna("").astype(str).str.strip()
         + " "

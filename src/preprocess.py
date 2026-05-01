@@ -98,9 +98,16 @@ def build_clean_history_table(
     ]
     metadata_cols = [col for col in metadata_cols if col in players_master.columns]
 
+    # IMPORTANT FIX:
+    # Rename current live price before merge so it does not collide with the
+    # historical "value" column inside player history.
+    players_meta = players_master[metadata_cols].copy()
+    if "price_m" in players_meta.columns:
+        players_meta = players_meta.rename(columns={"price_m": "current_price_m"})
+
     _emit_progress(progress_callback, 0.86, "Merging player metadata...")
     history = history.merge(
-        players_master[metadata_cols],
+        players_meta,
         left_on="player_id",
         right_on="id",
         how="left",
@@ -109,7 +116,6 @@ def build_clean_history_table(
     history = history.rename(
         columns={
             "web_name": "name",
-            "price_m": "value",
             "team_name_current": "team",
         }
     )
@@ -129,6 +135,21 @@ def build_clean_history_table(
 
     if "was_home" not in history.columns:
         history["was_home"] = 0
+
+    # IMPORTANT FIX:
+    # Force "value" to use the current live FPL price if available.
+    if "current_price_m" in history.columns:
+        history["value"] = pd.to_numeric(history["current_price_m"], errors="coerce")
+    elif "value" in history.columns:
+        # fallback if live price missing
+        history["value"] = pd.to_numeric(history["value"], errors="coerce")
+
+        # historical FPL value is often stored in tenths (e.g. 59 = 5.9)
+        # so convert only if values look too large
+        if history["value"].dropna().gt(20).any():
+            history["value"] = history["value"] / 10.0
+    else:
+        history["value"] = 0.0
 
     required_cols = [
         "name",
