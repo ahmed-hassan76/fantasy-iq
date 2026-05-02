@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import time
 import streamlit as st
 import pandas as pd
@@ -134,6 +135,7 @@ def inject_custom_css():
             padding: 16px;
             border-radius: 18px;
             box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+            min-height: 108px;
         }
 
         [data-testid="metric-container"] label {
@@ -390,6 +392,15 @@ def section_box_title(title: str, subtitle: str | None = None):
 
 inject_custom_css()
 
+
+def infer_current_fpl_season_label(today: datetime | None = None) -> str:
+    if today is None:
+        today = datetime.now()
+
+    start_year = today.year if today.month >= 7 else today.year - 1
+    return f"{start_year}-{start_year + 1}"
+
+
 # -----------------------------
 # Cached loaders
 # -----------------------------
@@ -410,6 +421,7 @@ def load_gw1_hybrid_outputs_cached(
         progress_callback=None,
         verbose=False,
     )
+
 
 # -----------------------------
 # Loading UI helpers
@@ -521,6 +533,7 @@ def load_gw1_hybrid_outputs_with_ui(
     st.session_state[session_key] = outputs
     return outputs
 
+
 # -----------------------------
 # Formatting helpers
 # -----------------------------
@@ -534,7 +547,7 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "price_m": "Price",
         "predicted_points": "Predicted Points",
         "model_used": "Model Used",
-        "source_round": "Latest Completed Round",
+        "source_round": "Latest Available Source Round",
     }
     temp = temp.rename(columns=rename_map)
 
@@ -550,7 +563,7 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "Price",
         "Predicted Points",
         "Model Used",
-        "Latest Completed Round",
+        "Latest Available Source Round",
     ]
     existing_cols = [col for col in preferred_cols if col in temp.columns]
     return temp[existing_cols]
@@ -873,6 +886,7 @@ def build_best_current_starting_xi(squad_df: pd.DataFrame) -> tuple[pd.DataFrame
 
     return best_starting_df, best_bench_df, best_formation
 
+
 def build_best_gw1_starting_xi(squad_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     """
     Build the best valid starting XI from the GW1 hybrid squad
@@ -923,6 +937,7 @@ def build_best_gw1_starting_xi(squad_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
             best_formation = f"{def_count}-{mid_count}-{fwd_count}"
 
     return best_starting_df, best_bench_df, best_formation
+
 
 # -----------------------------
 # Sidebar
@@ -1119,8 +1134,8 @@ elif page == "Squad Builder":
                 starting_df, bench_df, formation = build_best_current_starting_xi(squad_df)
 
                 if not starting_df.empty:
-                 st.markdown(f"### Best Current Starting XI ({formation})")
-                render_pitch(starting_df, bench_df)
+                    st.markdown(f"### Best Current Starting XI ({formation})")
+                    render_pitch(starting_df, bench_df)
 
                 st.markdown("### Full 15-Player Squad")
                 st.dataframe(
@@ -1130,7 +1145,7 @@ elif page == "Squad Builder":
 
         with tab2:
             st.markdown(
-                '<div class="comparison-banner">GW1 Squad Builder</div>',
+                f'<div class="comparison-banner">GW1 Squad Builder - {infer_current_fpl_season_label()} Season</div>',
                 unsafe_allow_html=True
             )
 
@@ -1138,16 +1153,16 @@ elif page == "Squad Builder":
                 "This section builds an initial Gameweek 1 squad automatically using the previous season summary and the live current player pool"
             )
 
-            col_a, col_b = st.columns(2)
+            controls_col_a, controls_col_b = st.columns([1, 1], gap="large")
 
-            with col_a:
+            with controls_col_a:
                 include_unmatched = st.toggle(
                     "Include unmatched players",
                     value=True,
                     help="Keep players without a previous-season match in the pool using fallback scoring."
                 )
 
-            with col_b:
+            with controls_col_b:
                 unmatched_penalty = st.slider(
                     "Unmatched player penalty",
                     min_value=0.50,
@@ -1179,19 +1194,20 @@ elif page == "Squad Builder":
                 hybrid_cost = hybrid_squad["value"].sum() / 10.0
                 hybrid_score = hybrid_squad["hybrid_score"].sum()
 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Candidate Players", len(candidate_pool))
-                c2.metric("Matched Players", matched_count)
-                c3.metric("Unmatched Players", unmatched_count)
-                c4.metric("Hybrid Squad Cost", f"{hybrid_cost:.1f}")
+                metric_row_1 = st.columns(4, gap="large")
+                metric_row_1[0].metric("Candidate Players", len(candidate_pool))
+                metric_row_1[1].metric("Matched Players", matched_count)
+                metric_row_1[2].metric("Unmatched Players", unmatched_count)
+                metric_row_1[3].metric("Hybrid Squad Cost", f"{hybrid_cost:.1f}")
 
-                c5, c6, c7 = st.columns(3)
-                c5.metric("Hybrid Squad Players", len(hybrid_squad))
-                c6.metric("Hybrid Score Total", f"{hybrid_score:.2f}")
-                c7.metric(
+                metric_row_2 = st.columns(4, gap="large")
+                metric_row_2[0].metric("Hybrid Squad Players", len(hybrid_squad))
+                metric_row_2[1].metric("Hybrid Score Total", f"{hybrid_score:.2f}")
+                metric_row_2[2].metric(
                     "Solve Status",
                     summary_df.iloc[0]["Solve_Status"] if not summary_df.empty else "Unknown"
                 )
+                metric_row_2[3].empty()
 
                 col_left, col_right = st.columns(2)
 
@@ -1215,7 +1231,7 @@ elif page == "Squad Builder":
 
                 st.markdown(
                     '<div class="comparison-banner">Hybrid GW1 Squad</div>',
-                     unsafe_allow_html=True
+                    unsafe_allow_html=True
                 )
 
                 gw1_starting_df, gw1_bench_df, gw1_formation = build_best_gw1_starting_xi(hybrid_squad)
@@ -1263,7 +1279,7 @@ elif page == "Squad Builder":
 elif page == "Transfer Assistant":
     hero_header(
         "Transfer Assistant",
-        "Build your current 15-player squad by position, validate it, then choose your starting XI and get transfer recommendations. Squad Value may be over the 100m limit due to player price increase"        
+        "Build your current 15-player squad by position, validate it, then choose your starting XI and get transfer recommendations. Squad Value may be over the 100m limit due to player price increase"
     )
 
     predictions_df = load_predictions_with_ui()

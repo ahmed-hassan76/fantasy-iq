@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,6 +20,7 @@ from src.constants import (
 )
 
 ProgressCallback = Callable[[float, str], None]
+BOOTSTRAP_CACHE_MAX_AGE_SECONDS = 30 * 60
 
 
 class FPLApiError(Exception):
@@ -88,9 +90,18 @@ def _get_json(
 
 
 def fetch_bootstrap_static(use_cache: bool = True) -> dict[str, Any]:
+    cache_path = BOOTSTRAP_CACHE_FILE
+    if use_cache and cache_path.exists():
+        cache_age_seconds = time.time() - cache_path.stat().st_mtime
+        if cache_age_seconds > BOOTSTRAP_CACHE_MAX_AGE_SECONDS:
+            try:
+                cache_path.unlink()
+            except OSError:
+                cache_path = None
+
     payload = _get_json(
         url=BOOTSTRAP_STATIC_URL,
-        cache_path=BOOTSTRAP_CACHE_FILE,
+        cache_path=cache_path,
         use_cache=use_cache,
         save_cache=True,
     )

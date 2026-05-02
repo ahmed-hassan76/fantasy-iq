@@ -23,6 +23,7 @@ def build_feature_table(
     use_cache: bool = True,
     verbose: bool = True,
     progress_callback: ProgressCallback | None = None,
+    drop_missing_target: bool = True,
 ) -> pd.DataFrame:
     _log("[1/8] Loading clean history table...", verbose)
 
@@ -110,7 +111,11 @@ def build_feature_table(
     df = df.drop(columns=["total_points"])
 
     before_drop = len(df)
-    df = df.dropna().reset_index(drop=True)
+    if drop_missing_target:
+        df = df.dropna().reset_index(drop=True)
+    else:
+        required_feature_cols = sorted(set(GK_FEATURES + DEF_FEATURES + MID_FEATURES + FWD_FEATURES))
+        df = df.dropna(subset=required_feature_cols).reset_index(drop=True)
     after_drop = len(df)
     _log(f"Dropped {before_drop - after_drop} rows with incomplete history/target.", verbose)
 
@@ -161,6 +166,7 @@ def get_latest_round_inference_tables(
         use_cache=use_cache,
         verbose=verbose,
         progress_callback=feature_progress,
+        drop_missing_target=False,
     )
 
     if feature_df.empty:
