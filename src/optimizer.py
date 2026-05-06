@@ -25,6 +25,99 @@ def validate_prediction_table(df: pd.DataFrame) -> None:
         raise ValueError(f"Prediction table is missing required columns: {missing_cols}")
 
 
+def _has_valid_squad_shape(df: pd.DataFrame) -> bool:
+    if len(df) < 15 or "position" not in df.columns:
+        return False
+
+    position_counts = df["position"].value_counts()
+    required_counts = {
+        "GK": 2,
+        "DEF": 5,
+        "MID": 5,
+        "FWD": 3,
+    }
+    return all(position_counts.get(position, 0) >= count for position, count in required_counts.items())
+
+
+def _build_recent_involvement_mask(df: pd.DataFrame) -> pd.Series | None:
+    involvement_masks: list[pd.Series] = []
+
+    if "played_last_gw" in df.columns:
+        involvement_masks.append(pd.to_numeric(df["played_last_gw"], errors="coerce").fillna(0).gt(0))
+
+    if "minutes" in df.columns:
+        involvement_masks.append(pd.to_numeric(df["minutes"], errors="coerce").fillna(0).gt(0))
+
+    if "minutes_lag1" in df.columns:
+        involvement_masks.append(pd.to_numeric(df["minutes_lag1"], errors="coerce").fillna(0).gt(0))
+
+    if "minutes_rolling3" in df.columns:
+        involvement_masks.append(pd.to_numeric(df["minutes_rolling3"], errors="coerce").fillna(0).ge(15))
+
+    if "starts" in df.columns:
+        involvement_masks.append(pd.to_numeric(df["starts"], errors="coerce").fillna(0).gt(0))
+
+    if not involvement_masks:
+        return None
+
+    recent_mask = involvement_masks[0]
+    for mask in involvement_masks[1:]:
+        recent_mask = recent_mask | mask
+
+    return recent_mask
+
+
+def filter_best_current_candidate_pool(
+    predictions_df: pd.DataFrame,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """
+    Filter the Best Current Squad candidate pool using current availability
+    and a light recent-involvement check when those columns are available.
+    """
+    candidate_df = predictions_df.copy().reset_index(drop=True)
+    availability_mask = pd.Series(True, index=candidate_df.index)
+    filters_applied: list[str] = []
+
+    if "status" in candidate_df.columns:
+        status = candidate_df["status"].astype("string").str.lower().str.strip()
+        availability_mask = availability_mask & status.eq("a").fillna(False)
+        filters_applied.append("status == 'a'")
+
+    if "chance_of_playing_next_round" in candidate_df.columns:
+        chance = pd.to_numeric(candidate_df["chance_of_playing_next_round"], errors="coerce")
+        availability_mask = availability_mask & (chance.isna() | chance.ge(75))
+        filters_applied.append("chance_of_playing_next_round >= 75 or null")
+
+    availability_df = candidate_df[availability_mask].copy().reset_index(drop=True)
+
+    recent_mask = _build_recent_involvement_mask(availability_df)
+    if recent_mask is not None:
+        recent_df = availability_df[recent_mask].copy().reset_index(drop=True)
+        if _has_valid_squad_shape(recent_df):
+            _log(
+                f"Filtered candidates from {len(candidate_df)} to {len(recent_df)} "
+                f"using availability and recent involvement.",
+                verbose,
+            )
+            return recent_df
+
+        _log("Recent-involvement filter was too strict; falling back to availability-only pool.", verbose)
+
+    if filters_applied and _has_valid_squad_shape(availability_df):
+        _log(
+            f"Filtered candidates from {len(candidate_df)} to {len(availability_df)} "
+            f"using {', '.join(filters_applied)}.",
+            verbose,
+        )
+        return availability_df
+
+    if filters_applied:
+        _log("Availability filter was too strict; falling back to unfiltered prediction pool.", verbose)
+
+    return candidate_df
+
+
 def optimize_best_15_squad(
     predictions_df: pd.DataFrame,
     budget_limit: float = 100.0,
@@ -37,7 +130,10 @@ def optimize_best_15_squad(
     _log("[1/5] Validating prediction table...", verbose)
     validate_prediction_table(predictions_df)
 
-    candidate_df = predictions_df.copy().reset_index(drop=True)
+    candidate_df = filter_best_current_candidate_pool(
+        predictions_df=predictions_df,
+        verbose=verbose,
+    )
 
     _log(f"Candidate players available: {len(candidate_df)}", verbose)
 

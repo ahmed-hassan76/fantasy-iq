@@ -61,6 +61,8 @@ def build_feature_table(
         "was_home": "first",
         "total_points": "sum",
         "team": "first",
+        "status": "first",
+        "chance_of_playing_next_round": "first",
     })
 
     lag_features = [
@@ -138,10 +140,22 @@ def split_position_datasets(feature_df: pd.DataFrame, verbose: bool = True) -> d
     mid_df = feature_df[feature_df["position"] == "MID"].copy()
     fwd_df = feature_df[feature_df["position"] == "FWD"].copy()
 
-    gk_cols = ["name", "team", "round"] + GK_FEATURES + ["target"]
-    def_cols = ["name", "team", "round"] + DEF_FEATURES + ["target"]
-    mid_cols = ["name", "team", "round"] + MID_FEATURES + ["target"]
-    fwd_cols = ["name", "team", "round"] + FWD_FEATURES + ["target"]
+    passthrough_cols = [
+        "status",
+        "chance_of_playing_next_round",
+        "starts",
+        "minutes_lag1",
+        "minutes_rolling3",
+    ]
+    passthrough_cols = [col for col in passthrough_cols if col in feature_df.columns]
+
+    def ordered_existing_cols(cols: list[str]) -> list[str]:
+        return list(dict.fromkeys(col for col in cols if col in feature_df.columns))
+
+    gk_cols = ordered_existing_cols(["name", "team", "round"] + GK_FEATURES + passthrough_cols + ["target"])
+    def_cols = ordered_existing_cols(["name", "team", "round"] + DEF_FEATURES + passthrough_cols + ["target"])
+    mid_cols = ordered_existing_cols(["name", "team", "round"] + MID_FEATURES + passthrough_cols + ["target"])
+    fwd_cols = ordered_existing_cols(["name", "team", "round"] + FWD_FEATURES + passthrough_cols + ["target"])
 
     return {
         "GK": gk_df[gk_cols].copy(),

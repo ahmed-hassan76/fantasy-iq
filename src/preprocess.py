@@ -93,6 +93,8 @@ def build_clean_history_table(
         "full_name",
         "position",
         "price_m",
+        "status",
+        "chance_of_playing_next_round",
         "team_name_current",
         "team_short_name",
     ]
@@ -155,6 +157,8 @@ def build_clean_history_table(
         "name",
         "position",
         "team",
+        "status",
+        "chance_of_playing_next_round",
         "round",
         "assists",
         "clean_sheets",
@@ -170,7 +174,7 @@ def build_clean_history_table(
 
     for col in required_cols:
         if col not in history.columns:
-            history[col] = 0
+            history[col] = pd.NA if col in {"status", "chance_of_playing_next_round"} else 0
 
     clean_df = history[required_cols].copy()
     clean_df = clean_df.loc[:, ~clean_df.columns.duplicated()].copy()
@@ -187,6 +191,7 @@ def build_clean_history_table(
         "total_points",
         "value",
         "was_home",
+        "chance_of_playing_next_round",
     ]
 
     for col in numeric_cols:
