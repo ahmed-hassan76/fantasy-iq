@@ -145,9 +145,21 @@ def optimize_best_15_squad(
         for i in candidate_df.index
     }
 
-    # Objective: maximize predicted points
+    starter_vars = {
+        i: pulp.LpVariable(f"starter_{i}", cat="Binary")
+        for i in candidate_df.index
+    }
+
+    starter_weight = 1.0
+    bench_weight = 0.15
+
+    # Objective: prioritize the strongest valid starting XI while still valuing the bench.
     problem += pulp.lpSum(
-        candidate_df.loc[i, "predicted_points"] * player_vars[i]
+        candidate_df.loc[i, "predicted_points"]
+        * (
+            starter_weight * starter_vars[i]
+            + bench_weight * (player_vars[i] - starter_vars[i])
+        )
         for i in candidate_df.index
     )
 
@@ -184,6 +196,42 @@ def optimize_best_15_squad(
         candidate_df.loc[i, "price_m"] * player_vars[i]
         for i in candidate_df.index
     ) <= budget_limit
+
+    # Starting XI constraints
+    for i in candidate_df.index:
+        problem += starter_vars[i] <= player_vars[i]
+
+    problem += pulp.lpSum(starter_vars[i] for i in candidate_df.index) == 11
+
+    problem += pulp.lpSum(
+        starter_vars[i]
+        for i in candidate_df.index
+        if candidate_df.loc[i, "position"] == "GK"
+    ) == 1
+
+    starting_defenders = pulp.lpSum(
+        starter_vars[i]
+        for i in candidate_df.index
+        if candidate_df.loc[i, "position"] == "DEF"
+    )
+    problem += starting_defenders >= 3
+    problem += starting_defenders <= 5
+
+    starting_midfielders = pulp.lpSum(
+        starter_vars[i]
+        for i in candidate_df.index
+        if candidate_df.loc[i, "position"] == "MID"
+    )
+    problem += starting_midfielders >= 2
+    problem += starting_midfielders <= 5
+
+    starting_forwards = pulp.lpSum(
+        starter_vars[i]
+        for i in candidate_df.index
+        if candidate_df.loc[i, "position"] == "FWD"
+    )
+    problem += starting_forwards >= 1
+    problem += starting_forwards <= 3
 
     # Club limit
     unique_teams = candidate_df["team"].dropna().unique().tolist()
