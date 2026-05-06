@@ -90,6 +90,63 @@ def predict_for_position(position: str, df: pd.DataFrame, verbose: bool = True) 
     return output_df
 
 
+def add_player_risk_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add reusable player risk indicators from availability and recent involvement fields.
+    Missing columns are ignored so the prediction pipeline remains defensive.
+    """
+    if df.empty:
+        return df.copy()
+
+    output_df = df.copy()
+    high_risk = pd.Series(False, index=output_df.index)
+    medium_risk = pd.Series(False, index=output_df.index)
+    flag_lists = pd.Series([[] for _ in range(len(output_df))], index=output_df.index)
+
+    def add_flag(mask: pd.Series, label: str) -> None:
+        for idx in output_df.index[mask.fillna(False)]:
+            flag_lists.at[idx].append(label)
+
+    if "status" in output_df.columns:
+        status = output_df["status"].astype("string").str.lower().str.strip()
+        status_risk = status.notna() & status.ne("a")
+        high_risk = high_risk | status_risk
+        add_flag(status_risk, "Unavailable")
+
+    if "chance_of_playing_next_round" in output_df.columns:
+        chance = pd.to_numeric(output_df["chance_of_playing_next_round"], errors="coerce")
+        chance_risk = chance.notna() & chance.lt(75)
+        high_risk = high_risk | chance_risk
+        add_flag(chance_risk, "Chance < 75")
+
+    if "played_last_gw" in output_df.columns:
+        played_last_gw = pd.to_numeric(output_df["played_last_gw"], errors="coerce")
+        played_last_gw_risk = played_last_gw.notna() & played_last_gw.eq(0)
+        medium_risk = medium_risk | played_last_gw_risk
+        add_flag(played_last_gw_risk, "Did not play last GW")
+
+    if "minutes_lag1" in output_df.columns:
+        minutes_lag1 = pd.to_numeric(output_df["minutes_lag1"], errors="coerce")
+        minutes_lag1_risk = minutes_lag1.notna() & minutes_lag1.eq(0)
+        medium_risk = medium_risk | minutes_lag1_risk
+        add_flag(minutes_lag1_risk, "No minutes last GW")
+
+    if "minutes_rolling3" in output_df.columns:
+        minutes_rolling3 = pd.to_numeric(output_df["minutes_rolling3"], errors="coerce")
+        recent_minutes_risk = minutes_rolling3.notna() & minutes_rolling3.lt(15)
+        medium_risk = medium_risk | recent_minutes_risk
+        add_flag(recent_minutes_risk, "Low recent minutes")
+
+    output_df["risk_level"] = np.select(
+        [high_risk, medium_risk & ~high_risk],
+        ["High", "Medium"],
+        default="Low",
+    )
+    output_df["risk_flags"] = flag_lists.map(lambda flags: ", ".join(flags) if flags else "None")
+
+    return output_df
+
+
 def build_predictions_table(
     use_cache: bool = True,
     verbose: bool = True,
@@ -141,6 +198,7 @@ def build_predictions_table(
             predictions_df["price_m"] = predictions_df["price_m"] / 10.0
 
     predictions_df["predicted_points"] = predictions_df["predicted_points"].astype(float)
+    predictions_df = add_player_risk_indicators(predictions_df)
     predictions_df = predictions_df.sort_values(
         ["position", "predicted_points"],
         ascending=[True, False],

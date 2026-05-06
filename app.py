@@ -546,6 +546,8 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "position": "Position",
         "price_m": "Price",
         "predicted_points": "Predicted Points",
+        "risk_level": "Risk Level",
+        "risk_flags": "Risk Flags",
         "model_used": "Model Used",
         "source_round": "Latest Available Source Round",
     }
@@ -562,6 +564,8 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "Position",
         "Price",
         "Predicted Points",
+        "Risk Level",
+        "Risk Flags",
         "Model Used",
         "Latest Available Source Round",
     ]
@@ -578,6 +582,8 @@ def format_squad_table(df: pd.DataFrame) -> pd.DataFrame:
         "position": "Position",
         "price_m": "Price",
         "predicted_points": "Predicted Points",
+        "risk_level": "Risk Level",
+        "risk_flags": "Risk Flags",
         "model_used": "Model Used",
     }
     temp = temp.rename(columns=rename_map)
@@ -587,7 +593,7 @@ def format_squad_table(df: pd.DataFrame) -> pd.DataFrame:
     if "Predicted Points" in temp.columns:
         temp["Predicted Points"] = pd.to_numeric(temp["Predicted Points"], errors="coerce").round(2)
 
-    preferred_cols = ["Name", "Team", "Position", "Price", "Predicted Points", "Model Used"]
+    preferred_cols = ["Name", "Team", "Position", "Price", "Predicted Points", "Risk Level", "Risk Flags", "Model Used"]
     existing_cols = [col for col in preferred_cols if col in temp.columns]
 
     return temp[existing_cols].sort_values(
@@ -1016,7 +1022,10 @@ elif page == "Player Prediction Engine":
 
     section_box_title("Filters", "Filter players by position, team, price, and predicted points")
 
-    col1, col2, col3 = st.columns(3)
+    if "risk_level" in predictions_df.columns:
+        col1, col2, col3, col4 = st.columns(4)
+    else:
+        col1, col2, col3 = st.columns(3)
 
     with col1:
         position_options = ["All"] + sorted(predictions_df["position"].dropna().unique().tolist())
@@ -1028,6 +1037,12 @@ elif page == "Player Prediction Engine":
 
     with col3:
         sort_order = st.selectbox("Sort by Predicted Points", ["Descending", "Ascending"])
+
+    selected_risk_level = "All"
+    if "risk_level" in predictions_df.columns:
+        with col4:
+            risk_options = ["All"] + sorted(predictions_df["risk_level"].dropna().unique().tolist())
+            selected_risk_level = st.selectbox("Risk Level", risk_options)
 
     min_price = float(predictions_df["price_m"].min())
     max_price = float(predictions_df["price_m"].max())
@@ -1047,6 +1062,9 @@ elif page == "Player Prediction Engine":
 
     if selected_team != "All":
         filtered_df = filtered_df[filtered_df["team"] == selected_team]
+
+    if selected_risk_level != "All" and "risk_level" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["risk_level"] == selected_risk_level]
 
     filtered_df = filtered_df[
         (filtered_df["price_m"] >= selected_price_range[0])
