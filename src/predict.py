@@ -102,40 +102,39 @@ def add_player_risk_indicators(df: pd.DataFrame) -> pd.DataFrame:
     high_risk = pd.Series(False, index=output_df.index)
     medium_risk = pd.Series(False, index=output_df.index)
     flag_lists = pd.Series([[] for _ in range(len(output_df))], index=output_df.index)
+    news_text = pd.Series("", index=output_df.index)
 
-    def add_flag(mask: pd.Series, label: str) -> None:
+    if "news" in output_df.columns:
+        news_text = output_df["news"].fillna("").astype(str).str.strip()
+
+    def add_flag(mask: pd.Series, label: str | pd.Series) -> None:
         for idx in output_df.index[mask.fillna(False)]:
-            flag_lists.at[idx].append(label)
+            flag = label.at[idx] if isinstance(label, pd.Series) else label
+            flag = str(flag).strip()
+            if flag and flag.lower() not in {"none", "nan"} and flag not in flag_lists.at[idx]:
+                flag_lists.at[idx].append(flag)
+
+    def news_or_fallback(fallback: str) -> pd.Series:
+        return news_text.where(news_text.ne(""), fallback)
 
     if "status" in output_df.columns:
         status = output_df["status"].astype("string").str.lower().str.strip()
         status_risk = status.notna() & status.ne("a")
         high_risk = high_risk | status_risk
-        add_flag(status_risk, "Unavailable")
+        add_flag(status_risk, news_or_fallback("Unavailable"))
 
     if "chance_of_playing_next_round" in output_df.columns:
         chance = pd.to_numeric(output_df["chance_of_playing_next_round"], errors="coerce")
         chance_risk = chance.notna() & chance.lt(75)
         high_risk = high_risk | chance_risk
-        add_flag(chance_risk, "Chance < 75")
-
-    if "played_last_gw" in output_df.columns:
-        played_last_gw = pd.to_numeric(output_df["played_last_gw"], errors="coerce")
-        played_last_gw_risk = played_last_gw.notna() & played_last_gw.eq(0)
-        medium_risk = medium_risk | played_last_gw_risk
-        add_flag(played_last_gw_risk, "Did not play last GW")
-
-    if "minutes_lag1" in output_df.columns:
-        minutes_lag1 = pd.to_numeric(output_df["minutes_lag1"], errors="coerce")
-        minutes_lag1_risk = minutes_lag1.notna() & minutes_lag1.eq(0)
-        medium_risk = medium_risk | minutes_lag1_risk
-        add_flag(minutes_lag1_risk, "No minutes last GW")
+        no_existing_flag = flag_lists.map(len).eq(0)
+        add_flag(chance_risk & no_existing_flag, news_or_fallback("Chance < 75"))
 
     if "minutes_rolling3" in output_df.columns:
         minutes_rolling3 = pd.to_numeric(output_df["minutes_rolling3"], errors="coerce")
-        recent_minutes_risk = minutes_rolling3.notna() & minutes_rolling3.lt(15)
+        recent_minutes_risk = minutes_rolling3.notna() & minutes_rolling3.lt(15) & ~high_risk
         medium_risk = medium_risk | recent_minutes_risk
-        add_flag(recent_minutes_risk, "Low recent minutes")
+        add_flag(recent_minutes_risk, "Limited recent minutes")
 
     output_df["risk_level"] = np.select(
         [high_risk, medium_risk & ~high_risk],

@@ -264,6 +264,15 @@ def inject_custom_css():
             font-weight: 800 !important;
         }
 
+        .player-card-risk {
+            color: #9b1c31 !important;
+            font-size: 0.70rem !important;
+            font-weight: 800 !important;
+            line-height: 1.1 !important;
+            margin-top: 4px !important;
+            word-break: break-word;
+        }
+
         .bench-wrapper {
             background: rgba(255,255,255,0.05);
             border-radius: 22px;
@@ -537,6 +546,23 @@ def load_gw1_hybrid_outputs_with_ui(
 # -----------------------------
 # Formatting helpers
 # -----------------------------
+def risk_badge_text(row: pd.Series) -> str:
+    if "risk_level" not in row.index or pd.isna(row["risk_level"]):
+        return ""
+
+    risk_level = str(row["risk_level"]).strip()
+    if risk_level.lower() in {"", "low", "none", "nan"}:
+        return ""
+
+    if risk_level.lower() == "high":
+        return "🚨 High"
+
+    if risk_level.lower() == "medium":
+        return "⚠ Medium"
+
+    return risk_level
+
+
 def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
 
@@ -793,11 +819,15 @@ def build_player_card_html(row: pd.Series) -> str:
     else:
         score_text = ""
 
+    risk_text = risk_badge_text(row)
+    risk_html = f'<div class="player-card-risk">{risk_text}</div>' if risk_text else ""
+
     return f"""
     <div class="player-card">
         <div class="player-card-name">{name}</div>
         <div class="player-card-meta">{team} • £{price:.1f}m</div>
         <div class="player-card-points">{score_text}</div>
+        {risk_html}
     </div>
     """.strip()
 

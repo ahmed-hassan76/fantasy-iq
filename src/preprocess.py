@@ -29,7 +29,13 @@ def build_players_master_table(use_cache: bool = True) -> pd.DataFrame:
         "position",
         "price_m",
         "status",
+        "news",
+        "news_added",
         "chance_of_playing_next_round",
+        "chance_of_playing_this_round",
+        "selected_by_percent",
+        "can_select",
+        "removed",
     ]
     keep_cols = [col for col in keep_cols if col in players.columns]
     players = players[keep_cols].copy()
@@ -94,7 +100,13 @@ def build_clean_history_table(
         "position",
         "price_m",
         "status",
+        "news",
+        "news_added",
         "chance_of_playing_next_round",
+        "chance_of_playing_this_round",
+        "selected_by_percent",
+        "can_select",
+        "removed",
         "team_name_current",
         "team_short_name",
     ]
@@ -158,7 +170,13 @@ def build_clean_history_table(
         "position",
         "team",
         "status",
+        "news",
+        "news_added",
         "chance_of_playing_next_round",
+        "chance_of_playing_this_round",
+        "selected_by_percent",
+        "can_select",
+        "removed",
         "round",
         "assists",
         "clean_sheets",
@@ -174,7 +192,16 @@ def build_clean_history_table(
 
     for col in required_cols:
         if col not in history.columns:
-            history[col] = pd.NA if col in {"status", "chance_of_playing_next_round"} else 0
+            history[col] = pd.NA if col in {
+                "status",
+                "news",
+                "news_added",
+                "chance_of_playing_next_round",
+                "chance_of_playing_this_round",
+                "selected_by_percent",
+                "can_select",
+                "removed",
+            } else 0
 
     clean_df = history[required_cols].copy()
     clean_df = clean_df.loc[:, ~clean_df.columns.duplicated()].copy()
@@ -192,6 +219,8 @@ def build_clean_history_table(
         "value",
         "was_home",
         "chance_of_playing_next_round",
+        "chance_of_playing_this_round",
+        "selected_by_percent",
     ]
 
     for col in numeric_cols:

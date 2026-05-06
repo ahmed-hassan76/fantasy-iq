@@ -62,7 +62,13 @@ def build_feature_table(
         "total_points": "sum",
         "team": "first",
         "status": "first",
+        "news": "first",
+        "news_added": "first",
         "chance_of_playing_next_round": "first",
+        "chance_of_playing_this_round": "first",
+        "selected_by_percent": "first",
+        "can_select": "first",
+        "removed": "first",
     })
 
     lag_features = [
@@ -142,7 +148,13 @@ def split_position_datasets(feature_df: pd.DataFrame, verbose: bool = True) -> d
 
     passthrough_cols = [
         "status",
+        "news",
+        "news_added",
         "chance_of_playing_next_round",
+        "chance_of_playing_this_round",
+        "selected_by_percent",
+        "can_select",
+        "removed",
         "starts",
         "minutes_lag1",
         "minutes_rolling3",
