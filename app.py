@@ -792,6 +792,125 @@ def format_captain_recommendation_table(
     return temp[existing_cols]
 
 
+def build_team_rating_summary(
+    current_squad_df: pd.DataFrame,
+    starting_df: pd.DataFrame,
+    bench_df: pd.DataFrame,
+) -> dict[str, object]:
+    starting_points = (
+        pd.to_numeric(starting_df["predicted_points"], errors="coerce").fillna(0).sum()
+        if "predicted_points" in starting_df.columns
+        else 0.0
+    )
+    bench_points = (
+        pd.to_numeric(bench_df["predicted_points"], errors="coerce").fillna(0).sum()
+        if "predicted_points" in bench_df.columns
+        else 0.0
+    )
+
+    starting_score = min(float(starting_points) * 1.2, 80)
+    bench_score = min(float(bench_points) * 0.5, 15)
+
+    fixture_adjustment = 0
+    fixture_summary = "Fixture data unavailable"
+    fixture_cols = [col for col in ["next_3_fdr_avg", "next_5_fdr_avg"] if col in starting_df.columns]
+    if fixture_cols:
+        fixture_values = pd.concat(
+            [pd.to_numeric(starting_df[col], errors="coerce") for col in fixture_cols],
+            ignore_index=True,
+        ).dropna()
+        if not fixture_values.empty:
+            avg_fixture_difficulty = float(fixture_values.mean())
+            if avg_fixture_difficulty <= 2.5:
+                fixture_adjustment = 5
+            elif avg_fixture_difficulty <= 3.0:
+                fixture_adjustment = 3
+            elif avg_fixture_difficulty <= 3.5:
+                fixture_adjustment = 1
+            elif avg_fixture_difficulty <= 4.0:
+                fixture_adjustment = -2
+            else:
+                fixture_adjustment = -5
+            fixture_summary = f"Average fixture difficulty: {avg_fixture_difficulty:.2f}"
+
+    high_starters = medium_starters = high_bench = medium_bench = 0
+    risk_penalty = 0
+    risk_summary = "Risk data unavailable"
+
+    if "risk_level" in current_squad_df.columns:
+        starter_risk = starting_df["risk_level"].fillna("").astype(str).str.lower().str.strip()
+        bench_risk = bench_df["risk_level"].fillna("").astype(str).str.lower().str.strip()
+
+        high_starters = int(starter_risk.eq("high").sum())
+        medium_starters = int(starter_risk.eq("medium").sum())
+        high_bench = int(bench_risk.eq("high").sum())
+        medium_bench = int(bench_risk.eq("medium").sum())
+
+        raw_risk_penalty = (
+            high_starters * 4
+            + medium_starters * 2
+            + high_bench * 2
+            + medium_bench
+        )
+        risk_penalty = min(raw_risk_penalty, 15)
+
+        risk_summary = (
+            f"Starters: {high_starters} High, {medium_starters} Medium. "
+            f"Bench: {high_bench} High, {medium_bench} Medium."
+        )
+
+        if "risk_flags" in current_squad_df.columns:
+            flags = (
+                current_squad_df["risk_flags"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            flags = [
+                flag
+                for flag in flags
+                if flag and flag.lower() not in {"none", "nan"}
+            ]
+            if flags:
+                risk_summary = f"{risk_summary} Flags: {', '.join(list(dict.fromkeys(flags))[:3])}."
+
+    rating = max(0, min(100, starting_score + bench_score + fixture_adjustment - risk_penalty))
+
+    notable_risks = high_starters + medium_starters + high_bench + medium_bench
+    if rating < 60 or high_starters >= 2:
+        transfer_need_level = "High"
+    elif rating < 75 or high_starters >= 1 or notable_risks >= 3:
+        transfer_need_level = "Medium"
+    else:
+        transfer_need_level = "Low"
+
+    return {
+        "overall_rating": rating,
+        "starting_xi_strength": float(starting_points),
+        "bench_strength": float(bench_points),
+        "starting_xi_score": starting_score,
+        "bench_score": bench_score,
+        "fixture_adjustment": fixture_adjustment,
+        "fixture_summary": fixture_summary,
+        "risk_penalty": risk_penalty,
+        "risk_warning_summary": risk_summary,
+        "transfer_need_level": transfer_need_level,
+    }
+
+
+def format_team_rating_breakdown(summary: dict[str, object]) -> pd.DataFrame:
+    risk_penalty = float(summary["risk_penalty"])
+    risk_penalty_text = "0" if risk_penalty == 0 else f"-{risk_penalty:.0f}"
+
+    return pd.DataFrame([
+        {"Component": "Starting XI Score", "Value": f"{float(summary['starting_xi_score']):.2f} / 80"},
+        {"Component": "Bench Score", "Value": f"{float(summary['bench_score']):.2f} / 15"},
+        {"Component": "Fixture Adjustment", "Value": f"{float(summary['fixture_adjustment']):+.0f}"},
+        {"Component": "Risk Penalty", "Value": risk_penalty_text},
+        {"Component": "Formula", "Value": "Starting XI Score + Bench Score + Fixture Adjustment - Risk Penalty"},
+    ])
+
+
 def format_one_transfer_table(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
     rename_map = {
@@ -1379,6 +1498,8 @@ if page == "Home":
 
     st.markdown('<div class="comparison-banner">Modules</div>', unsafe_allow_html=True)
     st.write("• Player Prediction Engine")
+    st.write("• Player Comparison")
+    st.write("• Fixture Planner")
     st.write("• Squad Builder")
     st.write("• Transfer Assistant")
 
@@ -2146,6 +2267,30 @@ elif page == "Transfer Assistant":
                         style_table(starting_captain_df),
                         use_container_width=True,
                     )
+
+                st.markdown('<div class="comparison-banner">Team Rating</div>', unsafe_allow_html=True)
+                team_rating = build_team_rating_summary(current_squad_df, starting_df, bench_df)
+
+                rating_col1, rating_col2, rating_col3 = st.columns(3)
+                rating_col1.metric("Overall Team Rating", f"{team_rating['overall_rating']:.0f}/100")
+                rating_col2.metric("Starting XI Strength", f"{team_rating['starting_xi_strength']:.2f}")
+                rating_col3.metric("Bench Strength", f"{team_rating['bench_strength']:.2f}")
+
+                risk_penalty = float(team_rating["risk_penalty"])
+                risk_penalty_text = "0" if risk_penalty == 0 else f"-{risk_penalty:.0f}"
+                rating_col4, rating_col5, rating_col6 = st.columns(3)
+                rating_col4.metric("Fixture Adjustment", f"{team_rating['fixture_adjustment']:+.0f}")
+                rating_col5.metric("Risk Penalty", risk_penalty_text)
+                rating_col6.metric("Transfer Need Level", str(team_rating["transfer_need_level"]))
+
+                st.info(
+                    f"{team_rating['risk_warning_summary']} "
+                    f"{team_rating['fixture_summary']}."
+                )
+                st.dataframe(
+                    style_table(format_team_rating_breakdown(team_rating)),
+                    use_container_width=True,
+                )
 
                 col_a, col_b = st.columns(2)
 
