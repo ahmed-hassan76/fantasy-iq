@@ -727,6 +727,71 @@ def format_squad_table(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def format_captain_recommendation_table(
+    df: pd.DataFrame,
+    top_n: int = 5,
+    roles: list[str] | None = None,
+) -> pd.DataFrame:
+    if df.empty or "predicted_points" not in df.columns:
+        return pd.DataFrame()
+
+    temp = df.copy()
+    temp["predicted_points"] = pd.to_numeric(temp["predicted_points"], errors="coerce")
+    temp = temp.dropna(subset=["predicted_points"])
+
+    if temp.empty:
+        return pd.DataFrame()
+
+    temp = temp.sort_values("predicted_points", ascending=False).head(top_n).reset_index(drop=True)
+    temp["predicted_captain_points"] = temp["predicted_points"] * 2
+
+    if roles is not None:
+        temp["captain_role"] = roles[:len(temp)]
+
+    rename_map = {
+        "captain_role": "Recommendation",
+        "name": "Name",
+        "team": "Team",
+        "position": "Position",
+        "price_m": "Price",
+        "predicted_points": "Predicted Points",
+        "predicted_captain_points": "Predicted Captain Points",
+        "risk_level": "Risk Level",
+        "risk_flags": "Risk Flags",
+        "next_3_fixtures": "Next 3 Fixtures",
+        "next_3_fdr_avg": "Next 3 FDR Avg",
+        "next_5_fixtures": "Next 5 Fixtures",
+        "next_5_fdr_avg": "Next 5 FDR Avg",
+    }
+    temp = temp.rename(columns=rename_map)
+
+    if "Price" in temp.columns:
+        temp["Price"] = pd.to_numeric(temp["Price"], errors="coerce").round(1)
+
+    for col in ["Predicted Points", "Predicted Captain Points", "Next 3 FDR Avg", "Next 5 FDR Avg"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
+
+    preferred_cols = [
+        "Recommendation",
+        "Name",
+        "Team",
+        "Position",
+        "Price",
+        "Predicted Points",
+        "Predicted Captain Points",
+        "Risk Level",
+        "Risk Flags",
+        "Next 3 Fixtures",
+        "Next 3 FDR Avg",
+        "Next 5 Fixtures",
+        "Next 5 FDR Avg",
+    ]
+    existing_cols = [col for col in preferred_cols if col in temp.columns]
+
+    return temp[existing_cols]
+
+
 def format_one_transfer_table(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
     rename_map = {
@@ -1393,15 +1458,19 @@ elif page == "Player Prediction Engine":
     c2.metric("Top Prediction", f"{filtered_df['predicted_points'].max():.2f}" if not filtered_df.empty else "0.00")
     c3.metric("Teams Shown", int(filtered_df["team"].nunique()) if not filtered_df.empty else 0)
 
+    st.markdown('<div class="comparison-banner">Captain Recommendations</div>', unsafe_allow_html=True)
+    captain_options_df = format_captain_recommendation_table(filtered_df, top_n=5)
+    if len(captain_options_df) < 2:
+        st.info("At least two available players are needed for captain recommendations.")
+    else:
+        st.dataframe(
+            style_table(captain_options_df),
+            use_container_width=True,
+        )
+
     st.markdown('<div class="comparison-banner">Prediction Results</div>', unsafe_allow_html=True)
     st.dataframe(
         style_table(format_prediction_table(filtered_df)),
-        use_container_width=True
-    )
-
-    st.markdown("### Top 10 Predicted Players")
-    st.dataframe(
-        style_table(format_prediction_table(filtered_df.head(10))),
         use_container_width=True
     )
 
@@ -2063,6 +2132,20 @@ elif page == "Transfer Assistant":
 
                 bench_df = current_squad_df[~current_squad_df["name"].isin(starting_names)].copy()
                 render_pitch(starting_df, bench_df)
+
+                st.markdown('<div class="comparison-banner">Captain & Vice-Captain Recommendation</div>', unsafe_allow_html=True)
+                starting_captain_df = format_captain_recommendation_table(
+                    starting_df,
+                    top_n=2,
+                    roles=["Captain", "Vice-Captain"],
+                )
+                if len(starting_captain_df) < 2:
+                    st.info("At least two starting XI players are needed for captain and vice-captain recommendations.")
+                else:
+                    st.dataframe(
+                        style_table(starting_captain_df),
+                        use_container_width=True,
+                    )
 
                 col_a, col_b = st.columns(2)
 
