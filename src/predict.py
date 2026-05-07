@@ -10,6 +10,7 @@ from tensorflow.keras.models import load_model
 
 from src.constants import FEATURES_BY_POSITION, MODEL_PATHS
 from src.features import get_latest_round_inference_tables
+from src.fixture_planner import add_fixture_summary_to_predictions
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -198,6 +199,7 @@ def build_predictions_table(
 
     predictions_df["predicted_points"] = predictions_df["predicted_points"].astype(float)
     predictions_df = add_player_risk_indicators(predictions_df)
+    predictions_df = add_fixture_summary_to_predictions(predictions_df, use_cache=use_cache)
     predictions_df = predictions_df.sort_values(
         ["position", "predicted_points"],
         ascending=[True, False],

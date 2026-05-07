@@ -61,6 +61,8 @@ def build_feature_table(
         "was_home": "first",
         "total_points": "sum",
         "team": "first",
+        "team_id": "first",
+        "team_short_name": "first",
         "status": "first",
         "news": "first",
         "news_added": "first",
@@ -147,6 +149,8 @@ def split_position_datasets(feature_df: pd.DataFrame, verbose: bool = True) -> d
     fwd_df = feature_df[feature_df["position"] == "FWD"].copy()
 
     passthrough_cols = [
+        "team_id",
+        "team_short_name",
         "status",
         "news",
         "news_added",

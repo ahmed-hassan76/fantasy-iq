@@ -40,14 +40,16 @@ def build_players_master_table(use_cache: bool = True) -> pd.DataFrame:
     keep_cols = [col for col in keep_cols if col in players.columns]
     players = players[keep_cols].copy()
 
+    if "team" in players.columns:
+        players["team_id"] = pd.to_numeric(players["team"], errors="coerce")
+
     if not teams.empty and "team" in players.columns and "team_id" in teams.columns:
         players = players.merge(
             teams[["team_id", "team_name", "team_short_name"]],
-            left_on="team",
+            left_on="team_id",
             right_on="team_id",
             how="left",
         )
-        players = players.drop(columns=["team_id"], errors="ignore")
         players = players.rename(columns={"team_name": "team_name_current"})
 
     return players
@@ -107,6 +109,7 @@ def build_clean_history_table(
         "selected_by_percent",
         "can_select",
         "removed",
+        "team_id",
         "team_name_current",
         "team_short_name",
     ]
@@ -177,7 +180,9 @@ def build_clean_history_table(
         "selected_by_percent",
         "can_select",
         "removed",
+        "team_id",
         "round",
+        "team_short_name",
         "assists",
         "clean_sheets",
         "goals_conceded",
@@ -201,12 +206,15 @@ def build_clean_history_table(
                 "selected_by_percent",
                 "can_select",
                 "removed",
+                "team_id",
+                "team_short_name",
             } else 0
 
     clean_df = history[required_cols].copy()
     clean_df = clean_df.loc[:, ~clean_df.columns.duplicated()].copy()
 
     numeric_cols = [
+        "team_id",
         "round",
         "assists",
         "clean_sheets",

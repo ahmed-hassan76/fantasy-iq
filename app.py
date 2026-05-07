@@ -574,6 +574,10 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "predicted_points": "Predicted Points",
         "risk_level": "Risk Level",
         "risk_flags": "Risk Flags",
+        "next_3_fixtures": "Next 3 Fixtures",
+        "next_3_fdr_avg": "Next 3 FDR Avg",
+        "next_5_fixtures": "Next 5 Fixtures",
+        "next_5_fdr_avg": "Next 5 FDR Avg",
         "model_used": "Model Used",
         "source_round": "Latest Available Source Round",
     }
@@ -583,6 +587,9 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         temp["Price"] = pd.to_numeric(temp["Price"], errors="coerce").round(1)
     if "Predicted Points" in temp.columns:
         temp["Predicted Points"] = pd.to_numeric(temp["Predicted Points"], errors="coerce").round(2)
+    for col in ["Next 3 FDR Avg", "Next 5 FDR Avg"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
 
     preferred_cols = [
         "Name",
@@ -592,6 +599,10 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "Predicted Points",
         "Risk Level",
         "Risk Flags",
+        "Next 3 Fixtures",
+        "Next 3 FDR Avg",
+        "Next 5 Fixtures",
+        "Next 5 FDR Avg",
         "Model Used",
         "Latest Available Source Round",
     ]
