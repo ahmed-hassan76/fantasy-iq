@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import html
 import time
 import streamlit as st
 import pandas as pd
@@ -899,6 +900,189 @@ def player_label(row: pd.Series) -> str:
     return f"{row['name']} | {row['position']} | {row['team']} | £{row['price_m']:.1f}m"
 
 
+def _format_comparison_value(row: pd.Series, col: str) -> str:
+    if col not in row.index or pd.isna(row[col]):
+        return "N/A"
+
+    value = row[col]
+
+    if col == "price_m":
+        numeric_value = pd.to_numeric(value, errors="coerce")
+        return f"{numeric_value:.1f}m" if pd.notna(numeric_value) else "N/A"
+
+    if col in {
+        "predicted_points",
+        "next_3_fdr_avg",
+        "next_5_fdr_avg",
+        "total_points_lag1",
+        "total_points_rolling3",
+        "minutes_lag1",
+        "minutes_rolling3",
+    }:
+        numeric_value = pd.to_numeric(value, errors="coerce")
+        return f"{numeric_value:.2f}" if pd.notna(numeric_value) else "N/A"
+
+    if col in {"played_last_gw", "starts"}:
+        numeric_value = pd.to_numeric(value, errors="coerce")
+        if pd.notna(numeric_value):
+            if numeric_value == 1:
+                return "Yes"
+            if numeric_value == 0:
+                return "No"
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        return str(value)
+
+    if col == "source_round":
+        numeric_value = pd.to_numeric(value, errors="coerce")
+        return f"{numeric_value:.0f}" if pd.notna(numeric_value) else str(value)
+
+    return str(value)
+
+
+def _player_select_label(row: pd.Series) -> str:
+    name = _format_comparison_value(row, "name")
+    team = _format_comparison_value(row, "team")
+    position = _format_comparison_value(row, "position")
+    return f"{name} ({team}, {position})"
+
+
+def render_player_comparison_card(row: pd.Series, title: str) -> None:
+    fields = [
+        ("Team", "team"),
+        ("Position", "position"),
+        ("Price", "price_m"),
+        ("Predicted Points", "predicted_points"),
+        ("Risk Level", "risk_level"),
+        ("Risk Flags", "risk_flags"),
+        ("Next 3 FDR Avg", "next_3_fdr_avg"),
+        ("Next 5 FDR Avg", "next_5_fdr_avg"),
+    ]
+    field_html = ""
+
+    for label, col in fields:
+        if col in row.index:
+            field_html += (
+                '<div class="small-muted" style="margin-top:0.45rem;">'
+                f"{html.escape(label)}"
+                "</div>"
+                f'<div style="color:white;font-weight:800;">{html.escape(_format_comparison_value(row, col))}</div>'
+            )
+
+    st.markdown(
+        f"""
+        <div class="section-card">
+            <div class="small-muted">{html.escape(title)}</div>
+            <div style="font-size:1.35rem;font-weight:900;color:white;">
+                {html.escape(_format_comparison_value(row, "name"))}
+            </div>
+            {field_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def build_player_comparison_table(player_1: pd.Series, player_2: pd.Series) -> pd.DataFrame:
+    comparison_fields = [
+        ("Name", "name"),
+        ("Team", "team"),
+        ("Position", "position"),
+        ("Price", "price_m"),
+        ("Predicted Points", "predicted_points"),
+        ("Risk Level", "risk_level"),
+        ("Risk Flags", "risk_flags"),
+        ("Latest Available Round", "source_round"),
+        ("Next 3 Fixtures", "next_3_fixtures"),
+        ("Next 3 FDR Avg", "next_3_fdr_avg"),
+        ("Next 5 Fixtures", "next_5_fixtures"),
+        ("Next 5 FDR Avg", "next_5_fdr_avg"),
+        ("Total Points Lag 1", "total_points_lag1"),
+        ("Total Points Rolling 3", "total_points_rolling3"),
+        ("Minutes Lag 1", "minutes_lag1"),
+        ("Minutes Rolling 3", "minutes_rolling3"),
+        ("Played Last GW", "played_last_gw"),
+        ("Starts", "starts"),
+    ]
+
+    rows = []
+    for label, col in comparison_fields:
+        if col in player_1.index or col in player_2.index:
+            rows.append({
+                "Field": label,
+                "Player 1": _format_comparison_value(player_1, col),
+                "Player 2": _format_comparison_value(player_2, col),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def _comparison_numeric(row: pd.Series, col: str) -> float | None:
+    if col not in row.index:
+        return None
+
+    value = pd.to_numeric(row[col], errors="coerce")
+    return float(value) if pd.notna(value) else None
+
+
+def _risk_rank(row: pd.Series) -> int | None:
+    if "risk_level" not in row.index or pd.isna(row["risk_level"]):
+        return None
+
+    risk_level = str(row["risk_level"]).strip().lower()
+    ranks = {"low": 0, "medium": 1, "high": 2}
+    return ranks.get(risk_level)
+
+
+def build_better_option_summary(player_1: pd.Series, player_2: pd.Series) -> str:
+    name_1 = _format_comparison_value(player_1, "name")
+    name_2 = _format_comparison_value(player_2, "name")
+    points_1 = _comparison_numeric(player_1, "predicted_points")
+    points_2 = _comparison_numeric(player_2, "predicted_points")
+
+    if points_1 is None or points_2 is None:
+        return "Better Option: Not enough predicted point data is available to make a comparison."
+
+    if points_1 >= points_2:
+        winner, loser = player_1, player_2
+        winner_name, loser_name = name_1, name_2
+    else:
+        winner, loser = player_2, player_1
+        winner_name, loser_name = name_2, name_1
+
+    winner_points = _comparison_numeric(winner, "predicted_points")
+    loser_points = _comparison_numeric(loser, "predicted_points")
+    point_gap = abs(points_1 - points_2)
+
+    if point_gap > 0.5:
+        return (
+            f"Better Option: {winner_name}. "
+            f"{winner_name} projects higher on predicted points "
+            f"({winner_points:.2f} vs {loser_points:.2f})."
+        )
+
+    context = [
+        f"Better Option: {winner_name}. Predicted points are close "
+        f"({winner_points:.2f} vs {loser_points:.2f})."
+    ]
+
+    winner_risk = _risk_rank(winner)
+    loser_risk = _risk_rank(loser)
+    if winner_risk is not None and loser_risk is not None and winner_risk != loser_risk:
+        lower_risk_name = winner_name if winner_risk < loser_risk else loser_name
+        context.append(f"{lower_risk_name} has the lower risk level.")
+
+    for fixture_col, label in [("next_3_fdr_avg", "Next 3 FDR"), ("next_5_fdr_avg", "Next 5 FDR")]:
+        winner_fdr = _comparison_numeric(winner, fixture_col)
+        loser_fdr = _comparison_numeric(loser, fixture_col)
+        if winner_fdr is not None and loser_fdr is not None and winner_fdr != loser_fdr:
+            easier_name = winner_name if winner_fdr < loser_fdr else loser_name
+            context.append(f"{easier_name} has the easier {label}.")
+            break
+
+    return " ".join(context)
+
+
 def short_name(name: str, max_len: int = 16) -> str:
     if len(name) <= max_len:
         return name
@@ -1093,6 +1277,7 @@ page = st.sidebar.radio(
     [
         "Home",
         "Player Prediction Engine",
+        "Player Comparison",
         "Fixture Planner",
         "Squad Builder",
         "Transfer Assistant",
@@ -1219,6 +1404,105 @@ elif page == "Player Prediction Engine":
         style_table(format_prediction_table(filtered_df.head(10))),
         use_container_width=True
     )
+
+# -----------------------------
+# Player Comparison
+# -----------------------------
+elif page == "Player Comparison":
+    hero_header(
+        "Player Comparison",
+        "Compare two players side by side using the live prediction table"
+    )
+
+    predictions_df = load_predictions_with_ui()
+
+    if predictions_df.empty:
+        st.info("No prediction data is available for player comparison right now.")
+        st.stop()
+
+    if "name" not in predictions_df.columns:
+        st.info("Player names are not available in the prediction data right now.")
+        st.stop()
+
+    section_box_title("Filters", "Filter the player list before selecting two players")
+
+    filtered_players = predictions_df.copy()
+    filter_col1, filter_col2 = st.columns(2)
+
+    selected_position = "All"
+    if "position" in filtered_players.columns:
+        with filter_col1:
+            position_options = ["All"] + sorted(filtered_players["position"].dropna().astype(str).unique().tolist())
+            selected_position = st.selectbox("Position", position_options, key="comparison_position")
+
+    selected_team = "All"
+    if "team" in filtered_players.columns:
+        with filter_col2:
+            team_options = ["All"] + sorted(filtered_players["team"].dropna().astype(str).unique().tolist())
+            selected_team = st.selectbox("Team", team_options, key="comparison_team")
+
+    if selected_position != "All" and "position" in filtered_players.columns:
+        filtered_players = filtered_players[filtered_players["position"].astype(str) == selected_position]
+
+    if selected_team != "All" and "team" in filtered_players.columns:
+        filtered_players = filtered_players[filtered_players["team"].astype(str) == selected_team]
+
+    sort_cols = [col for col in ["position", "team", "name"] if col in filtered_players.columns]
+    if sort_cols:
+        filtered_players = filtered_players.sort_values(sort_cols, na_position="last").reset_index(drop=True)
+    else:
+        filtered_players = filtered_players.reset_index(drop=True)
+
+    if filtered_players.empty:
+        st.warning("No players match the selected comparison filters.")
+        st.stop()
+
+    player_options = filtered_players.index.tolist()
+    player_2_default = 1 if len(player_options) > 1 else 0
+
+    select_col1, select_col2 = st.columns(2)
+    with select_col1:
+        player_1_idx = st.selectbox(
+            "Player 1",
+            player_options,
+            format_func=lambda idx: _player_select_label(filtered_players.loc[idx]),
+            key="comparison_player_1",
+        )
+
+    with select_col2:
+        player_2_idx = st.selectbox(
+            "Player 2",
+            player_options,
+            index=player_2_default,
+            format_func=lambda idx: _player_select_label(filtered_players.loc[idx]),
+            key="comparison_player_2",
+        )
+
+    if player_1_idx == player_2_idx:
+        st.warning("Select two different players to compare.")
+
+    player_1 = filtered_players.loc[player_1_idx]
+    player_2 = filtered_players.loc[player_2_idx]
+
+    st.markdown('<div class="comparison-banner">Side-by-Side Comparison</div>', unsafe_allow_html=True)
+    card_col1, card_col2 = st.columns(2)
+    with card_col1:
+        render_player_comparison_card(player_1, "Player 1")
+    with card_col2:
+        render_player_comparison_card(player_2, "Player 2")
+
+    st.markdown('<div class="comparison-banner">Better Option</div>', unsafe_allow_html=True)
+    st.info(build_better_option_summary(player_1, player_2))
+
+    comparison_table = build_player_comparison_table(player_1, player_2)
+    if comparison_table.empty:
+        st.info("No comparable fields are available for these players right now.")
+    else:
+        st.markdown('<div class="comparison-banner">Comparison Table</div>', unsafe_allow_html=True)
+        st.dataframe(
+            style_table(comparison_table),
+            use_container_width=True
+        )
 
 # -----------------------------
 # Fixture Planner
