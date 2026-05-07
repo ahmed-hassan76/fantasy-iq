@@ -1203,11 +1203,10 @@ elif page == "Player Prediction Engine":
     ascending_flag = sort_order == "Ascending"
     filtered_df = filtered_df.sort_values("predicted_points", ascending=ascending_flag).reset_index(drop=True)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Players Shown", len(filtered_df))
     c2.metric("Top Prediction", f"{filtered_df['predicted_points'].max():.2f}" if not filtered_df.empty else "0.00")
-    c3.metric("Average Prediction", f"{filtered_df['predicted_points'].mean():.2f}" if not filtered_df.empty else "0.00")
-    c4.metric("Teams Shown", int(filtered_df["team"].nunique()) if not filtered_df.empty else 0)
+    c3.metric("Teams Shown", int(filtered_df["team"].nunique()) if not filtered_df.empty else 0)
 
     st.markdown('<div class="comparison-banner">Prediction Results</div>', unsafe_allow_html=True)
     st.dataframe(

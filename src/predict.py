@@ -118,22 +118,46 @@ def add_player_risk_indicators(df: pd.DataFrame) -> pd.DataFrame:
     def news_or_fallback(fallback: str) -> pd.Series:
         return news_text.where(news_text.ne(""), fallback)
 
+    chance = pd.Series(np.nan, index=output_df.index)
+    status_concern = pd.Series(False, index=output_df.index)
+    clearly_unavailable_status = pd.Series(False, index=output_df.index)
+
     if "status" in output_df.columns:
         status = output_df["status"].astype("string").str.lower().str.strip()
-        status_risk = status.notna() & status.ne("a")
-        high_risk = high_risk | status_risk
-        add_flag(status_risk, news_or_fallback("Unavailable"))
+        status_concern = status.notna() & status.ne("a")
+        clearly_unavailable_status = status.isin({"i", "n", "r", "s", "u"}).fillna(False)
 
     if "chance_of_playing_next_round" in output_df.columns:
         chance = pd.to_numeric(output_df["chance_of_playing_next_round"], errors="coerce")
-        chance_risk = chance.notna() & chance.lt(75)
-        high_risk = high_risk | chance_risk
-        no_existing_flag = flag_lists.map(len).eq(0)
-        add_flag(chance_risk & no_existing_flag, news_or_fallback("Chance < 75"))
+
+    news_concern = news_text.ne("")
+    clearly_unavailable_news = news_text.str.lower().str.contains(
+        r"\b(?:removed|suspended?|unavailable|ineligible|ruled out|not available)\b",
+        regex=True,
+        na=False,
+    )
+    chance_below_75 = chance.notna() & chance.lt(75)
+    chance_75 = chance.notna() & chance.eq(75)
+
+    availability_concern = status_concern | news_concern
+    clearly_unavailable = clearly_unavailable_status | clearly_unavailable_news
+    high_risk = high_risk | clearly_unavailable | chance_below_75
+
+    medium_availability_risk = availability_concern & ~high_risk
+    medium_chance_risk = chance_75 & ~high_risk
+    medium_risk = medium_risk | medium_availability_risk | medium_chance_risk
+
+    add_flag(clearly_unavailable, news_or_fallback("Unavailable"))
+    add_flag(medium_availability_risk, news_or_fallback("Availability concern"))
+    no_existing_flag = flag_lists.map(len).eq(0)
+    add_flag(chance_below_75 & no_existing_flag, news_or_fallback("Chance < 75"))
+    no_existing_flag = flag_lists.map(len).eq(0)
+    add_flag(medium_chance_risk & no_existing_flag, news_or_fallback("75% chance of playing"))
 
     if "minutes_rolling3" in output_df.columns:
         minutes_rolling3 = pd.to_numeric(output_df["minutes_rolling3"], errors="coerce")
-        recent_minutes_risk = minutes_rolling3.notna() & minutes_rolling3.lt(15) & ~high_risk
+        availability_or_chance_risk = high_risk | medium_availability_risk | medium_chance_risk
+        recent_minutes_risk = minutes_rolling3.notna() & minutes_rolling3.lt(15) & ~availability_or_chance_risk
         medium_risk = medium_risk | recent_minutes_risk
         add_flag(recent_minutes_risk, "Limited recent minutes")
 
