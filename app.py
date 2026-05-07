@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 from src.api import clear_api_cache
 from src.predict import build_predictions_table
+from src.fixture_planner import build_normalized_team_fixtures, build_team_fixture_summary
 from src.optimizer import build_optimized_squad_from_predictions, summarize_squad
 from src.gw1_builder import build_gw1_hybrid_outputs
 from src.transfer_logic import (
@@ -432,6 +433,13 @@ def load_gw1_hybrid_outputs_cached(
     )
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_fixture_planner_data_cached() -> tuple[pd.DataFrame, pd.DataFrame]:
+    fixtures_df = build_normalized_team_fixtures(use_cache=True)
+    summary_df = build_team_fixture_summary(use_cache=True)
+    return fixtures_df, summary_df
+
+
 # -----------------------------
 # Loading UI helpers
 # -----------------------------
@@ -605,6 +613,85 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
         "Next 5 FDR Avg",
         "Model Used",
         "Latest Available Source Round",
+    ]
+    existing_cols = [col for col in preferred_cols if col in temp.columns]
+    return temp[existing_cols]
+
+
+def format_fixture_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    temp = df.copy()
+
+    rename_map = {
+        "team_short_name": "Team Short Name",
+        "team_name": "Team",
+        "next_3_fixtures": "Next 3 Fixtures",
+        "next_3_fdr_avg": "Next 3 FDR Avg",
+        "next_3_fixture_count": "Next 3 Fixture Count",
+        "next_5_fixtures": "Next 5 Fixtures",
+        "next_5_fdr_avg": "Next 5 FDR Avg",
+        "next_5_fixture_count": "Next 5 Fixture Count",
+    }
+    temp = temp.rename(columns=rename_map)
+
+    for col in ["Next 3 FDR Avg", "Next 5 FDR Avg"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
+
+    preferred_cols = [
+        "Team Short Name",
+        "Team",
+        "Next 3 Fixtures",
+        "Next 3 FDR Avg",
+        "Next 3 Fixture Count",
+        "Next 5 Fixtures",
+        "Next 5 FDR Avg",
+        "Next 5 Fixture Count",
+    ]
+    existing_cols = [col for col in preferred_cols if col in temp.columns]
+    return temp[existing_cols]
+
+
+def format_upcoming_fixtures_table(df: pd.DataFrame) -> pd.DataFrame:
+    temp = df.copy()
+
+    if "is_home" in temp.columns:
+        temp["is_home"] = temp["is_home"].map({True: "H", False: "A"}).fillna("")
+
+    if "kickoff_time" in temp.columns:
+        kickoff = pd.to_datetime(temp["kickoff_time"], errors="coerce")
+        temp["kickoff_time"] = kickoff.dt.strftime("%Y-%m-%d %H:%M").fillna("")
+
+    rename_map = {
+        "team_short_name": "Team Short Name",
+        "team_name": "Team",
+        "event": "Gameweek",
+        "opponent_short_name": "Upcoming Opponent",
+        "is_home": "Home/Away",
+        "kickoff_time": "Kickoff Time",
+        "difficulty": "FDR",
+        "next_3_fdr_avg": "Next 3 FDR Avg",
+        "next_5_fdr_avg": "Next 5 FDR Avg",
+    }
+    temp = temp.rename(columns=rename_map)
+
+    for col in ["Gameweek", "FDR"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").astype("Int64")
+
+    for col in ["Next 3 FDR Avg", "Next 5 FDR Avg"]:
+        if col in temp.columns:
+            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
+
+    preferred_cols = [
+        "Team Short Name",
+        "Team",
+        "Gameweek",
+        "Upcoming Opponent",
+        "Home/Away",
+        "Kickoff Time",
+        "FDR",
+        "Next 3 FDR Avg",
+        "Next 5 FDR Avg",
     ]
     existing_cols = [col for col in preferred_cols if col in temp.columns]
     return temp[existing_cols]
@@ -1006,6 +1093,7 @@ page = st.sidebar.radio(
     [
         "Home",
         "Player Prediction Engine",
+        "Fixture Planner",
         "Squad Builder",
         "Transfer Assistant",
     ]
@@ -1132,6 +1220,165 @@ elif page == "Player Prediction Engine":
         style_table(format_prediction_table(filtered_df.head(10))),
         use_container_width=True
     )
+
+# -----------------------------
+# Fixture Planner
+# -----------------------------
+elif page == "Fixture Planner":
+    hero_header(
+        "Fixture Planner",
+        "View upcoming fixtures and fixture difficulty by team"
+    )
+
+    fixtures_df, summary_df = load_fixture_planner_data_cached()
+
+    if fixtures_df.empty:
+        st.info("No upcoming fixture data is available right now.")
+        st.stop()
+
+    section_box_title("Filters", "Filter teams and upcoming fixtures by fixture difficulty")
+
+    team_filter_col = None
+    if "team_name" in fixtures_df.columns and fixtures_df["team_name"].notna().any():
+        team_filter_col = "team_name"
+    elif "team_short_name" in fixtures_df.columns and fixtures_df["team_short_name"].notna().any():
+        team_filter_col = "team_short_name"
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if team_filter_col is not None:
+            team_options = ["All"] + sorted(fixtures_df[team_filter_col].dropna().astype(str).unique().tolist())
+        else:
+            team_options = ["All"]
+        selected_team = st.selectbox("Team", team_options)
+
+    difficulty_values = (
+        pd.to_numeric(fixtures_df["difficulty"], errors="coerce")
+        if "difficulty" in fixtures_df.columns
+        else pd.Series(dtype=float)
+    )
+    if difficulty_values.notna().any():
+        min_fdr = int(difficulty_values.dropna().min())
+        max_fdr = int(difficulty_values.dropna().max())
+        if min_fdr == max_fdr:
+            min_fdr = 1
+            max_fdr = 5
+    else:
+        min_fdr = 1
+        max_fdr = 5
+
+    with col2:
+        selected_fdr_range = st.slider(
+            "FDR Range",
+            min_value=min_fdr,
+            max_value=max_fdr,
+            value=(min_fdr, max_fdr),
+            step=1,
+        )
+
+    with col3:
+        fixture_limit = st.selectbox("Number of Upcoming Fixtures", [3, 5, "All available"])
+
+    filtered_summary = summary_df.copy()
+    filtered_fixtures = fixtures_df.copy()
+
+    if selected_team != "All" and team_filter_col is not None:
+        filtered_fixtures = filtered_fixtures[
+            filtered_fixtures[team_filter_col].astype(str) == selected_team
+        ].copy()
+        if team_filter_col in filtered_summary.columns:
+            filtered_summary = filtered_summary[
+                filtered_summary[team_filter_col].astype(str) == selected_team
+            ].copy()
+
+    sort_cols = [col for col in ["event", "kickoff_time", "fixture_id"] if col in filtered_fixtures.columns]
+    if sort_cols:
+        filtered_fixtures = filtered_fixtures.sort_values(sort_cols, na_position="last")
+
+    if fixture_limit != "All available":
+        group_col = None
+        if "team_id" in filtered_fixtures.columns:
+            group_col = "team_id"
+        elif team_filter_col is not None and team_filter_col in filtered_fixtures.columns:
+            group_col = team_filter_col
+
+        if group_col is not None:
+            filtered_fixtures = (
+                filtered_fixtures.groupby(group_col, group_keys=False, dropna=True)
+                .head(int(fixture_limit))
+                .reset_index(drop=True)
+            )
+        else:
+            filtered_fixtures = filtered_fixtures.head(int(fixture_limit)).reset_index(drop=True)
+
+    if "difficulty" in filtered_fixtures.columns and difficulty_values.notna().any():
+        filtered_difficulty = pd.to_numeric(filtered_fixtures["difficulty"], errors="coerce")
+        filtered_fixtures = filtered_fixtures[
+            filtered_difficulty.between(selected_fdr_range[0], selected_fdr_range[1])
+        ].copy()
+
+    if "next_3_fdr_avg" in filtered_summary.columns and difficulty_values.notna().any():
+        filtered_next_3 = pd.to_numeric(filtered_summary["next_3_fdr_avg"], errors="coerce")
+        filtered_summary = filtered_summary[
+            filtered_next_3.between(selected_fdr_range[0], selected_fdr_range[1])
+        ].copy()
+
+    metric_source = filtered_summary if not filtered_summary.empty else pd.DataFrame()
+    if not metric_source.empty and "team_id" in metric_source.columns:
+        teams_shown = int(metric_source["team_id"].nunique())
+    elif not metric_source.empty and team_filter_col is not None and team_filter_col in metric_source.columns:
+        teams_shown = int(metric_source[team_filter_col].nunique())
+    else:
+        teams_shown = int(filtered_fixtures["team_id"].nunique()) if "team_id" in filtered_fixtures.columns else 0
+
+    next_3_avg = (
+        pd.to_numeric(metric_source["next_3_fdr_avg"], errors="coerce")
+        if not metric_source.empty and "next_3_fdr_avg" in metric_source.columns
+        else pd.Series(dtype=float)
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Teams Shown", teams_shown)
+    c2.metric("Easiest Next 3 FDR Avg", f"{next_3_avg.min():.2f}" if next_3_avg.notna().any() else "0.00")
+    c3.metric("Hardest Next 3 FDR Avg", f"{next_3_avg.max():.2f}" if next_3_avg.notna().any() else "0.00")
+    c4.metric("Total Upcoming Fixtures Shown", len(filtered_fixtures))
+
+    if not filtered_summary.empty and "next_3_fdr_avg" in filtered_summary.columns:
+        filtered_summary = filtered_summary.sort_values("next_3_fdr_avg", na_position="last")
+
+    st.markdown('<div class="comparison-banner">Team Fixture Summary</div>', unsafe_allow_html=True)
+    if filtered_summary.empty:
+        st.info("No team fixture summary data is available for the selected filters.")
+    else:
+        st.dataframe(
+            style_table(format_fixture_summary_table(filtered_summary)),
+            use_container_width=True
+        )
+
+    detailed_fixtures = filtered_fixtures.copy()
+    if (
+        not summary_df.empty
+        and "team_id" in detailed_fixtures.columns
+        and "team_id" in summary_df.columns
+    ):
+        summary_avg_cols = [
+            col for col in ["team_id", "next_3_fdr_avg", "next_5_fdr_avg"] if col in summary_df.columns
+        ]
+        detailed_fixtures = detailed_fixtures.merge(
+            summary_df[summary_avg_cols].drop_duplicates(subset=["team_id"]),
+            on="team_id",
+            how="left",
+        )
+
+    st.markdown('<div class="comparison-banner">Detailed Upcoming Fixtures</div>', unsafe_allow_html=True)
+    if detailed_fixtures.empty:
+        st.info("No upcoming fixtures match the selected filters.")
+    else:
+        st.dataframe(
+            style_table(format_upcoming_fixtures_table(detailed_fixtures)),
+            use_container_width=True
+        )
 
 # -----------------------------
 # Squad Builder
