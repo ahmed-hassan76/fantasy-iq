@@ -12,6 +12,15 @@ def _log(message: str, verbose: bool = True) -> None:
 
 
 def validate_prediction_table(df: pd.DataFrame) -> None:
+    if df is None:
+        raise ValueError("Predictions are unavailable: prediction table is empty.")
+
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError("Predictions are unavailable: prediction table is not a DataFrame.")
+
+    if df.empty:
+        raise ValueError("Predictions are unavailable: prediction table is empty.")
+
     required_cols = [
         "name",
         "team",
@@ -22,7 +31,10 @@ def validate_prediction_table(df: pd.DataFrame) -> None:
 
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"Prediction table is missing required columns: {missing_cols}")
+        raise ValueError(
+            "Predictions are unavailable: prediction table is missing required optimizer columns: "
+            f"{missing_cols}"
+        )
 
 
 def _has_valid_squad_shape(df: pd.DataFrame) -> bool:

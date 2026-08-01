@@ -489,23 +489,34 @@ def load_optimized_squad_with_ui() -> pd.DataFrame:
     status_box = st.empty()
     start_time = time.time()
 
-    status_box.info("Building the optimized squad from the current live prediction table.")
-    progress.progress(10, text="Loading live predictions...")
+    try:
+        status_box.info("Building the optimized squad from the current live prediction table.")
+        progress.progress(10, text="Loading live predictions...")
 
-    predictions_df = load_predictions_with_ui()
+        predictions_df = load_predictions_with_ui()
 
-    progress.progress(65, text="Running squad optimization...")
-    squad_df = build_optimized_squad_from_predictions(
-        predictions_df=predictions_df,
-        verbose=False,
-    )
+        progress.progress(65, text="Running squad optimization...")
+        squad_df = build_optimized_squad_from_predictions(
+            predictions_df=predictions_df,
+            verbose=False,
+        )
 
-    elapsed = time.time() - start_time
-    progress.progress(100, text="Optimized squad ready.")
-    status_box.success(f"Optimized squad loaded successfully in {elapsed:.1f} seconds.")
+        elapsed = time.time() - start_time
+        progress.progress(100, text="Optimized squad ready.")
+        status_box.success(f"Optimized squad loaded successfully in {elapsed:.1f} seconds.")
 
-    st.session_state["optimized_squad_df"] = squad_df
-    return squad_df
+        st.session_state["optimized_squad_df"] = squad_df
+        return squad_df
+    except Exception as exc:
+        elapsed = time.time() - start_time
+        message = str(exc).strip() or "Best Current Squad could not be built right now."
+        status_box.warning(
+            "Best Current Squad is currently unavailable because live predictions do not have enough current-season history yet, especially early in a new season. The GW1 Squad Builder tab remains available."
+        )
+        st.caption(f"Details: {message}")
+        st.session_state["optimized_squad_df"] = pd.DataFrame()
+        progress.progress(100, text="Best Current Squad unavailable.")
+        return pd.DataFrame()
 
 
 def load_gw1_hybrid_outputs_with_ui(
