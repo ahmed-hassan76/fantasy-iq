@@ -630,6 +630,114 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
     return temp[existing_cols]
 
 
+def build_prediction_log_export(df: pd.DataFrame) -> tuple[pd.DataFrame, int | None]:
+    source_df = df.reset_index(drop=True).copy()
+
+    def export_values(*column_names: str) -> pd.Series:
+        for column_name in column_names:
+            if column_name in source_df.columns:
+                return source_df[column_name]
+        return pd.Series("", index=source_df.index, dtype="object")
+
+    gameweek = None
+    for gameweek_column in (
+        "target_gameweek",
+        "prediction_gameweek",
+        "target_round",
+        "prediction_round",
+        "gameweek",
+    ):
+        if gameweek_column not in source_df.columns:
+            continue
+
+        gameweek_values = pd.to_numeric(source_df[gameweek_column], errors="coerce").dropna().unique()
+        if len(gameweek_values) == 1 and float(gameweek_values[0]).is_integer():
+            gameweek = int(gameweek_values[0])
+            break
+
+    position_values = export_values("position")
+    model_values = position_values.astype("string").str.upper().map(
+        {
+            "GK": "Linear Regression",
+            "DEF": "Linear Regression",
+            "MID": "Linear Regression",
+            "FWD": "LSTM",
+        }
+    )
+
+    export_df = pd.DataFrame(index=source_df.index)
+    export_df["Gameweek"] = gameweek if gameweek is not None else ""
+    export_df["Export Timestamp"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    export_df["Player Name"] = export_values("name")
+    export_df["Team"] = export_values("team")
+    export_df["Position"] = position_values
+    export_df["Price"] = pd.to_numeric(export_values("price_m"), errors="coerce").round(1)
+    export_df["Predicted Points"] = pd.to_numeric(
+        export_values("predicted_points"), errors="coerce"
+    ).round(2)
+    export_df["Actual Points"] = ""
+    export_df["Error (Actual - Predicted)"] = ""
+    export_df["Absolute Error"] = ""
+    export_df["Squared Error"] = ""
+    export_df["Risk Level"] = export_values("risk_level")
+    export_df["Risk Flags"] = export_values("risk_flags")
+    export_df["Next 3 FDR Avg"] = pd.to_numeric(
+        export_values("next_3_fdr_avg"), errors="coerce"
+    ).round(2)
+    export_df["Next 5 FDR Avg"] = pd.to_numeric(
+        export_values("next_5_fdr_avg"), errors="coerce"
+    ).round(2)
+    export_df["Model Used"] = model_values.fillna("")
+    export_df["Latest Available Source Round"] = export_values(
+        "source_round",
+        "latest_available_source_round",
+        "latest_available_round",
+        "round",
+    )
+    export_df["Notes"] = ""
+
+    return export_df, gameweek
+
+
+def render_prediction_results_header(
+    df: pd.DataFrame,
+    unavailable_message: str = "Prediction export unavailable until prediction results are loaded.",
+) -> None:
+    title_col, export_col = st.columns([3, 1])
+
+    with title_col:
+        st.markdown('<div class="comparison-banner">Prediction Results</div>', unsafe_allow_html=True)
+
+    with export_col:
+        if df.empty:
+            st.download_button(
+                "Download Prediction Log CSV",
+                data=b"",
+                file_name="fantasy_iq_prediction_log.csv",
+                mime="text/csv",
+                key="download_prediction_log_csv",
+                disabled=True,
+                use_container_width=True,
+            )
+            st.caption(unavailable_message)
+            return
+
+        prediction_log_df, prediction_gameweek = build_prediction_log_export(df)
+        prediction_log_filename = (
+            f"fantasy_iq_prediction_log_GW{prediction_gameweek}.csv"
+            if prediction_gameweek is not None
+            else "fantasy_iq_prediction_log.csv"
+        )
+        st.download_button(
+            "Download Prediction Log CSV",
+            data=prediction_log_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=prediction_log_filename,
+            mime="text/csv",
+            key="download_prediction_log_csv",
+            use_container_width=True,
+        )
+
+
 def format_fixture_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
 
@@ -1528,6 +1636,7 @@ elif page == "Player Prediction Engine":
     predictions_df = load_predictions_with_ui()
 
     if predictions_df.empty:
+        render_prediction_results_header(predictions_df)
         st.error("No prediction data was returned.")
         st.stop()
 
@@ -1600,7 +1709,10 @@ elif page == "Player Prediction Engine":
             use_container_width=True,
         )
 
-    st.markdown('<div class="comparison-banner">Prediction Results</div>', unsafe_allow_html=True)
+    render_prediction_results_header(
+        filtered_df,
+        unavailable_message="Prediction export unavailable for the current filters.",
+    )
     st.dataframe(
         style_table(format_prediction_table(filtered_df)),
         use_container_width=True
