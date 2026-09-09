@@ -8,7 +8,11 @@ import pandas as pd
 from src.api import clear_api_cache
 from src.predict import build_predictions_table
 from src.fixture_planner import build_normalized_team_fixtures, build_team_fixture_summary
-from src.optimizer import build_optimized_squad_from_predictions, summarize_squad
+from src.optimizer import (
+    build_optimized_squad_from_predictions,
+    optimize_best_15_squad,
+    summarize_squad,
+)
 from src.gw1_builder import build_gw1_hybrid_outputs
 from src.transfer_logic import (
     recommend_best_one_transfer,
@@ -630,7 +634,56 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
     return temp[existing_cols]
 
 
-def build_prediction_log_export(df: pd.DataFrame) -> tuple[pd.DataFrame, int | None]:
+def infer_prediction_target_gameweek(df: pd.DataFrame) -> int | None:
+    """Infer the predicted GW without confusing it with the model's source data round."""
+    source_df = df.reset_index(drop=True)
+
+    # target_gameweek is the gameweek being predicted/exported. A target column is
+    # reliable only when every populated row identifies the same valid FPL gameweek.
+    for gameweek_column in (
+        "target_gameweek",
+        "prediction_gameweek",
+        "target_round",
+        "prediction_round",
+        "event",
+        "gameweek",
+        "round",
+    ):
+        if gameweek_column not in source_df.columns:
+            continue
+
+        gameweek_values = pd.to_numeric(source_df[gameweek_column], errors="coerce").dropna().unique()
+        if (
+            len(gameweek_values) == 1
+            and float(gameweek_values[0]).is_integer()
+            and 4 <= int(gameweek_values[0]) <= 38
+        ):
+            return int(gameweek_values[0])
+
+    # source_round is the last available data used by the model, so predictions
+    # made from source round N are for target gameweek N + 1.
+    for source_round_column in (
+        "source_round",
+        "latest_available_source_round",
+        "Latest Available Source Round",
+        "latest_available_round",
+    ):
+        if source_round_column not in source_df.columns:
+            continue
+
+        source_round_values = pd.to_numeric(source_df[source_round_column], errors="coerce").dropna()
+        if not source_round_values.empty:
+            inferred_gameweek = int(source_round_values.max()) + 1
+            if 4 <= inferred_gameweek <= 38:
+                return inferred_gameweek
+
+    return None
+
+
+def build_prediction_log_export(
+    df: pd.DataFrame,
+    target_gameweek: int | None = None,
+) -> tuple[pd.DataFrame, int | None]:
     source_df = df.reset_index(drop=True).copy()
 
     def export_values(*column_names: str) -> pd.Series:
@@ -639,21 +692,7 @@ def build_prediction_log_export(df: pd.DataFrame) -> tuple[pd.DataFrame, int | N
                 return source_df[column_name]
         return pd.Series("", index=source_df.index, dtype="object")
 
-    gameweek = None
-    for gameweek_column in (
-        "target_gameweek",
-        "prediction_gameweek",
-        "target_round",
-        "prediction_round",
-        "gameweek",
-    ):
-        if gameweek_column not in source_df.columns:
-            continue
-
-        gameweek_values = pd.to_numeric(source_df[gameweek_column], errors="coerce").dropna().unique()
-        if len(gameweek_values) == 1 and float(gameweek_values[0]).is_integer():
-            gameweek = int(gameweek_values[0])
-            break
+    gameweek = target_gameweek if target_gameweek is not None else infer_prediction_target_gameweek(source_df)
 
     position_values = export_values("position")
     model_values = position_values.astype("string").str.upper().map(
@@ -675,6 +714,8 @@ def build_prediction_log_export(df: pd.DataFrame) -> tuple[pd.DataFrame, int | N
     export_df["Predicted Points"] = pd.to_numeric(
         export_values("predicted_points"), errors="coerce"
     ).round(2)
+    # Actual points are intentionally blank until the target gameweek finishes;
+    # populating them for a future prediction would introduce data leakage.
     export_df["Actual Points"] = ""
     export_df["Error (Actual - Predicted)"] = ""
     export_df["Absolute Error"] = ""
@@ -701,6 +742,7 @@ def build_prediction_log_export(df: pd.DataFrame) -> tuple[pd.DataFrame, int | N
 
 def render_prediction_results_header(
     df: pd.DataFrame,
+    target_gameweek: int | None = None,
     unavailable_message: str = "Prediction export unavailable until prediction results are loaded.",
 ) -> None:
     title_col, export_col = st.columns([3, 1])
@@ -713,7 +755,11 @@ def render_prediction_results_header(
             st.download_button(
                 "Download Prediction Log CSV",
                 data=b"",
-                file_name="fantasy_iq_prediction_log.csv",
+                file_name=(
+                    f"fantasy_iq_prediction_log_GW{target_gameweek}.csv"
+                    if target_gameweek is not None
+                    else "fantasy_iq_prediction_log.csv"
+                ),
                 mime="text/csv",
                 key="download_prediction_log_csv",
                 disabled=True,
@@ -722,12 +768,8 @@ def render_prediction_results_header(
             st.caption(unavailable_message)
             return
 
-        prediction_log_df, prediction_gameweek = build_prediction_log_export(df)
-        prediction_log_filename = (
-            f"fantasy_iq_prediction_log_GW{prediction_gameweek}.csv"
-            if prediction_gameweek is not None
-            else "fantasy_iq_prediction_log.csv"
-        )
+        prediction_log_df, prediction_gameweek = build_prediction_log_export(df, target_gameweek)
+        prediction_log_filename = f"fantasy_iq_prediction_log_GW{prediction_gameweek}.csv"
         st.download_button(
             "Download Prediction Log CSV",
             data=prediction_log_df.to_csv(index=False).encode("utf-8-sig"),
@@ -995,14 +1037,6 @@ def build_team_rating_summary(
 
     rating = max(0, min(100, starting_score + bench_score + fixture_adjustment - risk_penalty))
 
-    notable_risks = high_starters + medium_starters + high_bench + medium_bench
-    if rating < 60 or high_starters >= 2:
-        transfer_need_level = "High"
-    elif rating < 75 or high_starters >= 1 or notable_risks >= 3:
-        transfer_need_level = "Medium"
-    else:
-        transfer_need_level = "Low"
-
     return {
         "overall_rating": rating,
         "starting_xi_strength": float(starting_points),
@@ -1013,7 +1047,6 @@ def build_team_rating_summary(
         "fixture_summary": fixture_summary,
         "risk_penalty": risk_penalty,
         "risk_warning_summary": risk_summary,
-        "transfer_need_level": transfer_need_level,
     }
 
 
@@ -1022,79 +1055,261 @@ def format_team_rating_breakdown(summary: dict[str, object]) -> pd.DataFrame:
     risk_penalty_text = "0" if risk_penalty == 0 else f"-{risk_penalty:.0f}"
 
     return pd.DataFrame([
-        {"Component": "Starting XI Score", "Value": f"{float(summary['starting_xi_score']):.2f} / 80"},
-        {"Component": "Bench Score", "Value": f"{float(summary['bench_score']):.2f} / 15"},
-        {"Component": "Fixture Adjustment", "Value": f"{float(summary['fixture_adjustment']):+.0f}"},
-        {"Component": "Risk Penalty", "Value": risk_penalty_text},
-        {"Component": "Formula", "Value": "Starting XI Score + Bench Score + Fixture Adjustment - Risk Penalty"},
+        {
+            "Factor": "Overall Team Rating",
+            "What it means": "Overall squad score out of 100",
+            "Impact": (
+                f"{float(summary['overall_rating']):.0f} / 100 "
+                f"({describe_team_rating(float(summary['overall_rating']))})"
+            ),
+        },
+        {
+            "Factor": "Team Strength Level",
+            "What it means": "Plain-English interpretation of the overall team rating",
+            "Impact": describe_team_rating(float(summary["overall_rating"])),
+        },
+        {
+            "Factor": "Starting XI Strength",
+            "What it means": "Strength of the selected 11 starters",
+            "Impact": (
+                f"{float(summary['starting_xi_strength']):.2f} predicted points; "
+                f"contributes {float(summary['starting_xi_score']):.2f} / 80"
+            ),
+        },
+        {
+            "Factor": "Bench Strength",
+            "What it means": "Quality of the 4 bench players",
+            "Impact": (
+                f"{float(summary['bench_strength']):.2f} predicted points; "
+                f"contributes {float(summary['bench_score']):.2f} / 15"
+            ),
+        },
+        {
+            "Factor": "Fixture Adjustment",
+            "What it means": "Bonus or penalty based on upcoming fixture difficulty",
+            "Impact": f"{float(summary['fixture_adjustment']):+.0f} points",
+        },
+        {
+            "Factor": "Risk Penalty",
+            "What it means": "Deduction for injured, doubtful, suspended, or limited-minute players",
+            "Impact": f"{risk_penalty_text} points",
+        },
     ])
+
+
+def describe_team_rating(rating: float) -> str:
+    if rating >= 80:
+        return "Excellent"
+    if rating >= 65:
+        return "Strong"
+    if rating >= 50:
+        return "Average"
+    if rating >= 35:
+        return "Weak"
+    return "Needs attention"
 
 
 def format_one_transfer_table(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
     rename_map = {
         "player_out": "Player Out",
-        "player_out_team": "Out Team",
         "player_out_position": "Out Position",
-        "player_out_price": "Out Price",
-        "player_out_predicted_points": "Out Predicted Points",
         "player_in": "Player In",
-        "player_in_team": "In Team",
         "player_in_position": "In Position",
-        "player_in_price": "In Price",
-        "player_in_predicted_points": "In Predicted Points",
         "predicted_points_gain": "Predicted Points Gain",
-        "budget_change": "Budget Change",
         "remaining_money_in_bank": "Remaining Money In Bank",
-        "outgoing_is_starter": "Outgoing Is Starter",
+        "outgoing_is_starter": "Outgoing Starter",
     }
     temp = temp.rename(columns=rename_map)
 
-    # Prices should always display with 1 decimal in FPL format
-    for col in ["Out Price", "In Price"]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(1)
-
-    # Prediction / budget values can stay at 2 decimals
-    for col in [
-        "Out Predicted Points",
-        "In Predicted Points",
+    transfer_columns = [
+        "Player Out",
+        "Out Position",
+        "Player In",
+        "In Position",
         "Predicted Points Gain",
-        "Budget Change",
         "Remaining Money In Bank",
-    ]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
+        "Outgoing Starter",
+    ]
+    for column in transfer_columns:
+        if column not in temp.columns:
+            temp[column] = ""
 
-    return temp
+    temp["Predicted Points Gain"] = pd.to_numeric(
+        temp["Predicted Points Gain"], errors="coerce"
+    ).round(2)
+    temp["Remaining Money In Bank"] = pd.to_numeric(
+        temp["Remaining Money In Bank"], errors="coerce"
+    ).round(1)
+    temp["Outgoing Starter"] = temp["Outgoing Starter"].map(
+        lambda value: "Yes" if value is True or value == 1 else "No"
+    )
+    return temp[transfer_columns]
 
 
-def format_two_transfer_table(df: pd.DataFrame) -> pd.DataFrame:
-    temp = df.copy()
-    rename_map = {
-        "player_out_1": "Player Out 1",
-        "player_out_2": "Player Out 2",
-        "player_out_positions": "Out Positions",
-        "player_in_1": "Player In 1",
-        "player_in_2": "Player In 2",
-        "player_in_positions": "In Positions",
-        "predicted_points_gain": "Predicted Points Gain",
-        "budget_change": "Budget Change",
-        "remaining_money_in_bank": "Remaining Money In Bank",
-        "outgoing_1_is_starter": "Outgoing 1 Is Starter",
-        "outgoing_2_is_starter": "Outgoing 2 Is Starter",
-    }
-    temp = temp.rename(columns=rename_map)
+def build_two_transfer_display(
+    recommendation: pd.Series,
+    predictions_df: pd.DataFrame,
+    starting_names: list[str],
+) -> pd.DataFrame:
+    """Expand one paired recommendation into two readable transfer rows."""
+    player_lookup = predictions_df.drop_duplicates("name").set_index("name")
+    display_rows: list[dict[str, object]] = []
 
-    for col in [
-        "Predicted Points Gain",
-        "Budget Change",
-        "Remaining Money In Bank",
-    ]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(temp[col], errors="coerce").round(2)
+    for transfer_number in (1, 2):
+        player_out = recommendation.get(f"player_out_{transfer_number}", "")
+        player_in = recommendation.get(f"player_in_{transfer_number}", "")
+        outgoing = player_lookup.loc[player_out] if player_out in player_lookup.index else None
+        incoming = player_lookup.loc[player_in] if player_in in player_lookup.index else None
 
-    return temp
+        outgoing_points = pd.to_numeric(
+            outgoing.get("predicted_points") if outgoing is not None else None,
+            errors="coerce",
+        )
+        incoming_points = pd.to_numeric(
+            incoming.get("predicted_points") if incoming is not None else None,
+            errors="coerce",
+        )
+        points_gain = (
+            float(incoming_points - outgoing_points)
+            if pd.notna(incoming_points) and pd.notna(outgoing_points)
+            else None
+        )
+        display_rows.append(
+            {
+                "Player Out": player_out,
+                "Out Position": outgoing.get("position", "") if outgoing is not None else "",
+                "Player In": player_in,
+                "In Position": incoming.get("position", "") if incoming is not None else "",
+                "Predicted Points Gain": points_gain,
+                "Remaining Money In Bank": recommendation.get("remaining_money_in_bank"),
+                "Outgoing Starter": player_out in starting_names,
+            }
+        )
+
+    return format_one_transfer_table(pd.DataFrame(display_rows))
+
+
+def build_wildcard_change_display(
+    current_squad_df: pd.DataFrame,
+    wildcard_squad_df: pd.DataFrame,
+    starting_names: list[str],
+    remaining_bank: float,
+) -> pd.DataFrame:
+    """Pair Wildcard changes by position and return the shared transfer display schema."""
+    current_names = set(current_squad_df["name"])
+    wildcard_names = set(wildcard_squad_df["name"])
+    outgoing_df = current_squad_df[~current_squad_df["name"].isin(wildcard_names)].copy()
+    incoming_df = wildcard_squad_df[~wildcard_squad_df["name"].isin(current_names)].copy()
+    display_rows: list[dict[str, object]] = []
+
+    for position in ["GK", "DEF", "MID", "FWD"]:
+        outgoing_players = outgoing_df[outgoing_df["position"] == position].sort_values(
+            "predicted_points", ascending=True
+        ).to_dict("records")
+        incoming_players = incoming_df[incoming_df["position"] == position].sort_values(
+            "predicted_points", ascending=False
+        ).to_dict("records")
+        pair_count = max(len(outgoing_players), len(incoming_players))
+
+        for index in range(pair_count):
+            outgoing = outgoing_players[index] if index < len(outgoing_players) else {}
+            incoming = incoming_players[index] if index < len(incoming_players) else {}
+            outgoing_points = pd.to_numeric(outgoing.get("predicted_points"), errors="coerce")
+            incoming_points = pd.to_numeric(incoming.get("predicted_points"), errors="coerce")
+            points_gain = (
+                float(incoming_points - outgoing_points)
+                if pd.notna(incoming_points) and pd.notna(outgoing_points)
+                else None
+            )
+            player_out = outgoing.get("name", "")
+            display_rows.append(
+                {
+                    "Player Out": player_out,
+                    "Out Position": outgoing.get("position", position),
+                    "Player In": incoming.get("name", ""),
+                    "In Position": incoming.get("position", position),
+                    "Predicted Points Gain": points_gain,
+                    "Remaining Money In Bank": remaining_bank,
+                    "Outgoing Starter": player_out in starting_names if player_out else False,
+                }
+            )
+
+    return format_one_transfer_table(pd.DataFrame(display_rows))
+
+
+def apply_transfer_recommendation_to_squad(
+    current_squad_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    outgoing_names: list[str],
+    incoming_names: list[str],
+) -> tuple[pd.DataFrame, str]:
+    """Build and validate an atomic squad update without mutating the current squad."""
+    if len(outgoing_names) != len(incoming_names) or not outgoing_names:
+        return pd.DataFrame(), "The recommendation does not contain a complete set of transfers."
+    if len(set(outgoing_names)) != len(outgoing_names) or len(set(incoming_names)) != len(incoming_names):
+        return pd.DataFrame(), "The recommendation contains duplicate players and cannot be applied safely."
+
+    current_names = current_squad_df["name"].astype(str).tolist()
+    missing_outgoing = [name for name in outgoing_names if name not in current_names]
+    if missing_outgoing:
+        return pd.DataFrame(), f"Outgoing player(s) not found in the current squad: {', '.join(missing_outgoing)}."
+
+    retained_names = [name for name in current_names if name not in outgoing_names]
+    duplicate_incoming = [name for name in incoming_names if name in retained_names]
+    if duplicate_incoming:
+        return pd.DataFrame(), f"Incoming player(s) already exist in the squad: {', '.join(duplicate_incoming)}."
+
+    updated_names = retained_names + incoming_names
+    if len(updated_names) != 15 or len(set(updated_names)) != 15:
+        return pd.DataFrame(), "Applying this recommendation would not leave exactly 15 unique players."
+
+    prediction_rows = predictions_df[predictions_df["name"].isin(updated_names)].copy()
+    name_counts = prediction_rows["name"].value_counts()
+    ambiguous_names = [name for name in updated_names if int(name_counts.get(name, 0)) != 1]
+    if ambiguous_names:
+        return pd.DataFrame(), (
+            "The following player records are missing or ambiguous: "
+            f"{', '.join(ambiguous_names)}."
+        )
+
+    updated_squad_df = prediction_rows.set_index("name").loc[updated_names].reset_index()
+    valid, reasons, _, _ = validate_full_squad(
+        updated_squad_df,
+        money_in_bank=0.0,
+        enforce_budget=False,
+    )
+    if not valid:
+        return pd.DataFrame(), "Recommendation was not applied: " + " ".join(reasons)
+
+    predicted_values = pd.to_numeric(updated_squad_df["predicted_points"], errors="coerce")
+    if predicted_values.isna().any():
+        return pd.DataFrame(), "Recommendation was not applied because prediction values are missing."
+
+    return updated_squad_df.reset_index(drop=True), ""
+
+
+def format_transfer_assistant_squad(df: pd.DataFrame) -> pd.DataFrame:
+    """Format the applied squad using the concise Transfer Assistant schema."""
+    temp = df.rename(
+        columns={
+            "name": "Player",
+            "team": "Team",
+            "position": "Position",
+            "price_m": "Price",
+            "predicted_points": "Predicted Points",
+            "risk_level": "Risk Level",
+        }
+    ).copy()
+    columns = ["Player", "Team", "Position", "Price", "Predicted Points", "Risk Level"]
+    for column in columns:
+        if column not in temp.columns:
+            temp[column] = ""
+    temp["Price"] = pd.to_numeric(temp["Price"], errors="coerce").round(1)
+    temp["Predicted Points"] = pd.to_numeric(
+        temp["Predicted Points"], errors="coerce"
+    ).round(2)
+    return temp[columns]
 
 
 def format_gw1_squad_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -1508,6 +1723,63 @@ def build_best_current_starting_xi(squad_df: pd.DataFrame) -> tuple[pd.DataFrame
     return best_starting_df, best_bench_df, best_formation
 
 
+def build_transfer_assistant_starting_xi(
+    squad_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, str]:
+    """Return the highest-predicted valid XI without inventing missing predictions."""
+    required_columns = {"name", "position", "predicted_points"}
+    if squad_df.empty or not required_columns.issubset(squad_df.columns):
+        return pd.DataFrame(), ""
+
+    available_df = squad_df.copy()
+    available_df["predicted_points"] = pd.to_numeric(
+        available_df["predicted_points"], errors="coerce"
+    )
+    available_df = available_df.dropna(subset=["predicted_points"])
+
+    position_pools = {
+        position: available_df[available_df["position"] == position].sort_values(
+            "predicted_points", ascending=False
+        )
+        for position in ["GK", "DEF", "MID", "FWD"]
+    }
+
+    valid_formations = [
+        (3, 4, 3),
+        (3, 5, 2),
+        (4, 3, 3),
+        (4, 4, 2),
+        (4, 5, 1),
+        (5, 2, 3),
+        (5, 3, 2),
+        (5, 4, 1),
+    ]
+    best_xi = pd.DataFrame()
+    best_formation = ""
+    best_total = float("-inf")
+
+    for defender_count, midfielder_count, forward_count in valid_formations:
+        candidate = pd.concat(
+            [
+                position_pools["GK"].head(1),
+                position_pools["DEF"].head(defender_count),
+                position_pools["MID"].head(midfielder_count),
+                position_pools["FWD"].head(forward_count),
+            ],
+            ignore_index=True,
+        )
+        if len(candidate) != 11 or not validate_starting_xi(candidate):
+            continue
+
+        predicted_total = float(candidate["predicted_points"].sum())
+        if predicted_total > best_total:
+            best_total = predicted_total
+            best_xi = candidate.copy()
+            best_formation = f"{defender_count}-{midfielder_count}-{forward_count}"
+
+    return best_xi.reset_index(drop=True), best_formation
+
+
 def build_best_gw1_starting_xi(squad_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     """
     Build the best valid starting XI from the GW1 hybrid squad
@@ -1637,8 +1909,28 @@ elif page == "Player Prediction Engine":
 
     if predictions_df.empty:
         render_prediction_results_header(predictions_df)
-        st.error("No prediction data was returned.")
+        st.error("No prediction data is available for a target gameweek yet.")
         st.stop()
+
+    inferred_target_gameweek = infer_prediction_target_gameweek(predictions_df)
+    if inferred_target_gameweek is None:
+        render_prediction_results_header(predictions_df.iloc[0:0])
+        st.error("No valid prediction target is available. Predictions begin from GW4.")
+        st.stop()
+
+    # Only gameweeks represented by current prediction data are selectable. The
+    # app does not present empty or unsupported gameweeks as viewable predictions.
+    target_gameweek_options = [inferred_target_gameweek]
+    selected_target_gameweek = st.selectbox(
+        "Prediction Target Gameweek",
+        target_gameweek_options,
+        format_func=lambda gameweek: f"GW{gameweek}",
+        key="prediction_target_gameweek",
+    )
+    st.caption(
+        "The selected gameweek labels the current prediction export. Historical pre-deadline "
+        "predictions can only be reviewed if they were saved/exported earlier."
+    )
 
     section_box_title("Filters", "Filter players by position, team, price, and predicted points")
 
@@ -1711,6 +2003,7 @@ elif page == "Player Prediction Engine":
 
     render_prediction_results_header(
         filtered_df,
+        selected_target_gameweek,
         unavailable_message="Prediction export unavailable for the current filters.",
     )
     st.dataframe(
@@ -2190,6 +2483,15 @@ elif page == "Transfer Assistant":
         st.error("No prediction data was returned.")
         st.stop()
 
+    required_transfer_columns = {"name", "team", "position", "price_m", "predicted_points"}
+    missing_transfer_columns = sorted(required_transfer_columns - set(predictions_df.columns))
+    if missing_transfer_columns:
+        st.error(
+            "Transfer Assistant is unavailable because required prediction data is missing: "
+            f"{', '.join(missing_transfer_columns)}."
+        )
+        st.stop()
+
     section_box_title(
         "Step 1: Select Your Current 15-Player Squad",
         "Choose your squad by position first: 2 goalkeepers, 5 defenders, 5 midfielders, and 3 forwards."
@@ -2217,47 +2519,73 @@ elif page == "Transfer Assistant":
     mid_options = list(mid_label_map.keys())
     fwd_options = list(fwd_label_map.keys())
 
+    squad_widget_keys = {
+        "GK": "transfer_squad_gk",
+        "DEF": "transfer_squad_def",
+        "MID": "transfer_squad_mid",
+        "FWD": "transfer_squad_fwd",
+    }
+    pending_squad_names = st.session_state.pop("transfer_pending_squad_names", None)
+    if pending_squad_names is not None:
+        pending_names = set(pending_squad_names)
+        for position, label_map in [
+            ("GK", gk_label_map),
+            ("DEF", def_label_map),
+            ("MID", mid_label_map),
+            ("FWD", fwd_label_map),
+        ]:
+            st.session_state[squad_widget_keys[position]] = [
+                label for label, name in label_map.items() if name in pending_names
+            ]
+        if "transfer_pending_money_in_bank" in st.session_state:
+            st.session_state["transfer_money_in_bank"] = st.session_state.pop(
+                "transfer_pending_money_in_bank"
+            )
+
     col1, col2 = st.columns(2)
 
     with col1:
         selected_gk_labels = st.multiselect(
             "Select 2 Goalkeepers",
             options=gk_options,
-            default=[],
+            key=squad_widget_keys["GK"],
         )
 
         selected_def_labels = st.multiselect(
             "Select 5 Defenders",
             options=def_options,
-            default=[],
+            key=squad_widget_keys["DEF"],
         )
 
     with col2:
         selected_mid_labels = st.multiselect(
             "Select 5 Midfielders",
             options=mid_options,
-            default=[],
+            key=squad_widget_keys["MID"],
         )
 
         selected_fwd_labels = st.multiselect(
             "Select 3 Forwards",
             options=fwd_options,
-            default=[],
+            key=squad_widget_keys["FWD"],
         )
 
     money_in_bank = st.number_input(
         "Money In Bank",
         min_value=0.0,
-        max_value=20.0,
-        value=0.0,
         step=0.1,
+        key="transfer_money_in_bank",
     )
 
     transfer_count = st.radio(
         "Number of Transfers Available",
-        [1, 2],
+        [0, 1, 2, "Unlimited"],
         horizontal=True,
     )
+    if transfer_count == 0:
+        st.info("Transfer Action: No transfer action selected.")
+    elif transfer_count == "Unlimited":
+        st.info("Wildcard mode will recommend the best full squad rebuild within your available squad value and bank.")
 
     selected_gk_names = [gk_label_map[label] for label in selected_gk_labels]
     selected_def_names = [def_label_map[label] for label in selected_def_labels]
@@ -2272,9 +2600,27 @@ elif page == "Transfer Assistant":
     )
 
     current_squad_df = pd.DataFrame()
+    st.session_state["transfer_assistant_squad_df"] = current_squad_df.copy()
 
     if len(selected_names) > 0:
         current_squad_df = predictions_df[predictions_df["name"].isin(selected_names)].copy().reset_index(drop=True)
+        current_squad_signature = (
+            tuple(sorted(current_squad_df["name"].astype(str).tolist())),
+            round(float(money_in_bank), 1),
+        )
+        if st.session_state.get("transfer_recommendation_squad_signature") != current_squad_signature:
+            st.session_state.pop("transfer_one_recommendations", None)
+            st.session_state.pop("transfer_two_recommendations", None)
+            st.session_state.pop("transfer_wildcard_squad", None)
+            st.session_state["transfer_recommendation_squad_signature"] = current_squad_signature
+        st.session_state["transfer_assistant_squad_df"] = current_squad_df.copy()
+        applied_target_names = set(st.session_state.get("transfer_applied_target_names", []))
+        if (
+            st.session_state.get("transfer_has_applied_recommendation", False)
+            and applied_target_names
+            and applied_target_names != set(current_squad_df["name"].astype(str))
+        ):
+            st.session_state["transfer_has_applied_recommendation"] = False
 
         section_box_title("Step 2: Validate Current Squad", "The squad must satisfy all FPL constraints before moving to the Starting XI step.")
 
@@ -2304,6 +2650,30 @@ elif page == "Transfer Assistant":
             use_container_width=True
         )
 
+        applied_message = st.session_state.pop("transfer_applied_message", "")
+        if applied_message:
+            st.success(applied_message)
+
+        if st.session_state.get("transfer_has_applied_recommendation", False):
+            st.markdown('<div class="comparison-banner">Updated Squad After Applied Recommendation</div>', unsafe_allow_html=True)
+            st.dataframe(
+                style_table(format_transfer_assistant_squad(current_squad_df)),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if st.button("Undo Last Applied Recommendation", key="transfer_undo_recommendation"):
+                undo_names = st.session_state.get("transfer_undo_squad_names")
+                if undo_names:
+                    st.session_state["transfer_pending_squad_names"] = list(undo_names)
+                    st.session_state["transfer_pending_money_in_bank"] = float(
+                        st.session_state.get("transfer_undo_money_in_bank", money_in_bank)
+                    )
+                    st.session_state["transfer_has_applied_recommendation"] = False
+                    st.session_state["transfer_applied_message"] = "Last applied recommendation was undone."
+                    st.rerun()
+                else:
+                    st.warning("The previous squad is unavailable, so the last recommendation cannot be undone safely.")
+
         if valid:
             st.success("Your 15-player squad is valid.")
         else:
@@ -2317,9 +2687,80 @@ elif page == "Transfer Assistant":
                 "Choose 1 goalkeeper, 3 to 5 defenders, 2 to 5 midfielders, and 1 to 3 forwards."
             )
 
+            st.caption(
+                "Fantasy IQ recommends the highest predicted-points XI that satisfies FPL formation rules."
+            )
+
+            recommended_xi, recommended_formation = build_transfer_assistant_starting_xi(
+                current_squad_df
+            )
+            recommended_names = set(recommended_xi["name"].tolist()) if not recommended_xi.empty else set()
+
+            gk_name_to_label = {name: label for label, name in gk_label_map.items()}
+            def_name_to_label = {name: label for label, name in def_label_map.items()}
+            mid_name_to_label = {name: label for label, name in mid_label_map.items()}
+            fwd_name_to_label = {name: label for label, name in fwd_label_map.items()}
+
+            recommended_gk_labels = [
+                gk_name_to_label[name]
+                for name in recommended_names
+                if name in gk_name_to_label
+            ]
+            recommended_def_labels = [
+                def_name_to_label[name]
+                for name in recommended_names
+                if name in def_name_to_label
+            ]
+            recommended_mid_labels = [
+                mid_name_to_label[name]
+                for name in recommended_names
+                if name in mid_name_to_label
+            ]
+            recommended_fwd_labels = [
+                fwd_name_to_label[name]
+                for name in recommended_names
+                if name in fwd_name_to_label
+            ]
+
+            xi_widget_keys = {
+                "gk": "transfer_starting_gk",
+                "def": "transfer_starting_def",
+                "mid": "transfer_starting_mid",
+                "fwd": "transfer_starting_fwd",
+            }
+            squad_signature = tuple(sorted(selected_names))
+            if st.session_state.get("transfer_xi_squad_signature") != squad_signature:
+                st.session_state["transfer_xi_squad_signature"] = squad_signature
+                st.session_state[xi_widget_keys["gk"]] = (
+                    recommended_gk_labels[0] if recommended_gk_labels else selected_gk_labels[0]
+                )
+                st.session_state[xi_widget_keys["def"]] = recommended_def_labels
+                st.session_state[xi_widget_keys["mid"]] = recommended_mid_labels
+                st.session_state[xi_widget_keys["fwd"]] = recommended_fwd_labels
+
+            if st.button(
+                "Auto-select Best Starting XI",
+                disabled=recommended_xi.empty,
+                key="transfer_auto_select_xi",
+            ):
+                st.session_state[xi_widget_keys["gk"]] = recommended_gk_labels[0]
+                st.session_state[xi_widget_keys["def"]] = recommended_def_labels
+                st.session_state[xi_widget_keys["mid"]] = recommended_mid_labels
+                st.session_state[xi_widget_keys["fwd"]] = recommended_fwd_labels
+                st.rerun()
+
+            if recommended_xi.empty:
+                st.warning(
+                    "A complete automatic XI cannot be recommended because required prediction values are unavailable. "
+                    "You can still select the starting XI manually."
+                )
+            else:
+                st.caption(f"Recommended formation: {recommended_formation}")
+
             starting_gk_label = st.selectbox(
                 "Starting Goalkeeper",
                 options=selected_gk_labels,
+                key=xi_widget_keys["gk"],
             )
 
             col3, col4 = st.columns(2)
@@ -2328,20 +2769,20 @@ elif page == "Transfer Assistant":
                 starting_def_labels = st.multiselect(
                     "Starting Defenders (3 to 5)",
                     options=selected_def_labels,
-                    default=[],
+                    key=xi_widget_keys["def"],
                 )
 
                 starting_mid_labels = st.multiselect(
                     "Starting Midfielders (2 to 5)",
                     options=selected_mid_labels,
-                    default=[],
+                    key=xi_widget_keys["mid"],
                 )
 
             with col4:
                 starting_fwd_labels = st.multiselect(
                     "Starting Forwards (1 to 3)",
                     options=selected_fwd_labels,
-                    default=[],
+                    key=xi_widget_keys["fwd"],
                 )
 
             starting_names = (
@@ -2353,6 +2794,27 @@ elif page == "Transfer Assistant":
 
             starting_df = current_squad_df[current_squad_df["name"].isin(starting_names)].copy()
             starting_valid = validate_starting_xi(starting_df)
+            starting_prediction_values = (
+                pd.to_numeric(starting_df["predicted_points"], errors="coerce")
+                if "predicted_points" in starting_df.columns
+                else pd.Series(dtype="float64")
+            )
+            starting_predictions_complete = (
+                len(starting_prediction_values) == 11
+                and starting_prediction_values.notna().all()
+            )
+            squad_prediction_values = pd.to_numeric(
+                current_squad_df["predicted_points"], errors="coerce"
+            )
+            squad_price_values = pd.to_numeric(
+                current_squad_df["price_m"], errors="coerce"
+            )
+            rating_inputs_complete = (
+                starting_predictions_complete
+                and len(squad_prediction_values) == 15
+                and squad_prediction_values.notna().all()
+                and squad_price_values.notna().all()
+            )
 
             st.write(f"Starting XI selected: **{len(starting_df)}**")
 
@@ -2362,8 +2824,15 @@ elif page == "Transfer Assistant":
                 st.warning(
                     "Your starting XI is not valid. A valid XI needs exactly 11 players, exactly 1 GK, at least 3 DEF, at least 2 MID, and at least 1 FWD."
                 )
+                st.info("Complete or auto-select a valid starting XI to view the team rating.")
 
-            if starting_valid:
+            if starting_valid and not rating_inputs_complete:
+                st.warning(
+                    "Team rating and transfer recommendations are unavailable because one or more "
+                    "squad players do not have valid predicted points or price data."
+                )
+
+            if starting_valid and rating_inputs_complete:
                 c9, c10 = st.columns(2)
                 c9.metric(
                     "Current Squad Predicted Total",
@@ -2393,18 +2862,25 @@ elif page == "Transfer Assistant":
 
                 st.markdown('<div class="comparison-banner">Team Rating</div>', unsafe_allow_html=True)
                 team_rating = build_team_rating_summary(current_squad_df, starting_df, bench_df)
+                rating_interpretation = describe_team_rating(float(team_rating["overall_rating"]))
 
                 rating_col1, rating_col2, rating_col3 = st.columns(3)
                 rating_col1.metric("Overall Team Rating", f"{team_rating['overall_rating']:.0f}/100")
-                rating_col2.metric("Starting XI Strength", f"{team_rating['starting_xi_strength']:.2f}")
-                rating_col3.metric("Bench Strength", f"{team_rating['bench_strength']:.2f}")
+                rating_col2.metric("Team Strength Level", rating_interpretation)
+                rating_col3.metric("Starting XI Strength", f"{team_rating['starting_xi_strength']:.2f}")
 
                 risk_penalty = float(team_rating["risk_penalty"])
                 risk_penalty_text = "0" if risk_penalty == 0 else f"-{risk_penalty:.0f}"
                 rating_col4, rating_col5, rating_col6 = st.columns(3)
-                rating_col4.metric("Fixture Adjustment", f"{team_rating['fixture_adjustment']:+.0f}")
-                rating_col5.metric("Risk Penalty", risk_penalty_text)
-                rating_col6.metric("Transfer Need Level", str(team_rating["transfer_need_level"]))
+                rating_col4.metric("Bench Strength", f"{team_rating['bench_strength']:.2f}")
+                rating_col5.metric("Fixture Adjustment", f"{team_rating['fixture_adjustment']:+.0f}")
+                rating_col6.metric("Risk Penalty", risk_penalty_text)
+
+                st.caption(
+                    f"Overall rating: {rating_interpretation}. "
+                    "Bands: 80–100 Excellent; 65–79 Strong; 50–64 Average; "
+                    "35–49 Weak; below 35 Needs attention."
+                )
 
                 st.info(
                     f"{team_rating['risk_warning_summary']} "
@@ -2415,50 +2891,321 @@ elif page == "Transfer Assistant":
                     use_container_width=True,
                 )
 
-                col_a, col_b = st.columns(2)
-
-                with col_a:
+                run_one_transfer = False
+                run_two_transfers = False
+                run_wildcard = False
+                if transfer_count == 1:
                     run_one_transfer = st.button("Generate Best 1 Transfer")
-
-                with col_b:
+                elif transfer_count == 2:
                     run_two_transfers = st.button("Generate Best 2 Transfers")
+                elif transfer_count == "Unlimited":
+                    run_wildcard = st.button("Generate Wildcard Recommendation")
+
+                safe_recommendation_pool = predictions_df.copy()
+                safe_recommendation_pool["predicted_points"] = pd.to_numeric(
+                    safe_recommendation_pool["predicted_points"], errors="coerce"
+                )
+                safe_recommendation_pool["price_m"] = pd.to_numeric(
+                    safe_recommendation_pool["price_m"], errors="coerce"
+                )
+                safe_recommendation_pool = safe_recommendation_pool.dropna(
+                    subset=["name", "team", "position", "predicted_points", "price_m"]
+                ).reset_index(drop=True)
+
+                def queue_applied_squad(updated_squad_df: pd.DataFrame, updated_bank: float) -> None:
+                    validated_bank = pd.to_numeric(updated_bank, errors="coerce")
+                    if pd.isna(validated_bank) or float(validated_bank) < -1e-9:
+                        st.warning(
+                            "Recommendation was not applied because the selected changes would exceed "
+                            "the available transfer budget."
+                        )
+                        return
+                    st.session_state["transfer_undo_squad_names"] = current_squad_df["name"].tolist()
+                    st.session_state["transfer_undo_money_in_bank"] = float(money_in_bank)
+                    st.session_state["transfer_pending_squad_names"] = updated_squad_df["name"].tolist()
+                    st.session_state["transfer_pending_money_in_bank"] = max(
+                        0.0, round(float(validated_bank), 1)
+                    )
+                    st.session_state["transfer_has_applied_recommendation"] = True
+                    st.session_state["transfer_applied_target_names"] = updated_squad_df["name"].tolist()
+                    st.session_state["transfer_applied_message"] = (
+                        "Recommendation applied to your Transfer Assistant squad."
+                    )
+                    st.session_state.pop("transfer_one_recommendations", None)
+                    st.session_state.pop("transfer_two_recommendations", None)
+                    st.session_state.pop("transfer_wildcard_squad", None)
+                    st.rerun()
 
                 if run_one_transfer:
-                    with st.spinner("Generating best 1-transfer recommendations..."):
-                        one_transfer_df = recommend_best_one_transfer(
-                            current_squad_df=current_squad_df,
-                            predictions_df=predictions_df,
-                            money_in_bank=money_in_bank,
-                            starting_names=starting_names,
-                            verbose=False,
-                        )
-
-                    st.markdown('<div class="comparison-banner">Best 1-Transfer Recommendations</div>', unsafe_allow_html=True)
-
-                    if one_transfer_df.empty:
-                        st.info("No valid 1-transfer recommendations were found.")
-                    else:
-                        st.dataframe(
-                            style_table(format_one_transfer_table(one_transfer_df.head(20))),
-                            use_container_width=True,
-                        )
+                    try:
+                        with st.spinner("Generating best 1-transfer recommendations..."):
+                            st.session_state["transfer_one_recommendations"] = recommend_best_one_transfer(
+                                current_squad_df=current_squad_df,
+                                predictions_df=safe_recommendation_pool,
+                                money_in_bank=money_in_bank,
+                                starting_names=starting_names,
+                                verbose=False,
+                            )
+                    except Exception as exc:
+                        st.session_state["transfer_one_recommendations"] = pd.DataFrame()
+                        st.warning(f"A 1-transfer recommendation could not be generated safely. Details: {exc}")
 
                 if run_two_transfers:
-                    with st.spinner("Generating best 2-transfer recommendations..."):
-                        two_transfer_df = recommend_best_two_transfers(
-                            current_squad_df=current_squad_df,
-                            predictions_df=predictions_df,
-                            money_in_bank=money_in_bank,
-                            starting_names=starting_names,
-                            verbose=False,
+                    try:
+                        with st.spinner("Generating best 2-transfer recommendations..."):
+                            st.session_state["transfer_two_recommendations"] = recommend_best_two_transfers(
+                                current_squad_df=current_squad_df,
+                                predictions_df=safe_recommendation_pool,
+                                money_in_bank=money_in_bank,
+                                starting_names=starting_names,
+                                verbose=False,
+                            )
+                    except Exception as exc:
+                        st.session_state["transfer_two_recommendations"] = pd.DataFrame()
+                        st.warning(f"A 2-transfer recommendation could not be generated safely. Details: {exc}")
+
+                if run_wildcard:
+                    try:
+                        wildcard_budget = float(squad_cost + money_in_bank)
+                        with st.spinner("Generating the best Wildcard squad..."):
+                            st.session_state["transfer_wildcard_squad"] = optimize_best_15_squad(
+                                predictions_df=safe_recommendation_pool,
+                                budget_limit=wildcard_budget,
+                                club_limit=3,
+                                verbose=False,
+                            )
+                    except Exception as exc:
+                        st.session_state["transfer_wildcard_squad"] = pd.DataFrame()
+                        st.warning(
+                            "A safe Wildcard recommendation could not be generated from the available "
+                            f"predictions. Details: {exc}"
                         )
 
-                    st.markdown('<div class="comparison-banner">Best 2-Transfer Recommendations</div>', unsafe_allow_html=True)
+                if transfer_count == 1 and "transfer_one_recommendations" in st.session_state:
+                    one_transfer_df = st.session_state["transfer_one_recommendations"]
+                    st.markdown('<div class="comparison-banner">Best 1-Transfer Recommendations</div>', unsafe_allow_html=True)
+                    if one_transfer_df.empty:
+                        st.info("Transfer Action: No clear transfer upgrade found.")
+                        st.info("No valid 1-transfer recommendations were found.")
+                    else:
+                        useful_one_transfer = pd.to_numeric(
+                            one_transfer_df["predicted_points_gain"], errors="coerce"
+                        ).gt(0).any()
+                        if useful_one_transfer:
+                            st.success("Transfer Action: Transfer upgrade found.")
+                        else:
+                            st.info("Transfer Action: No clear transfer upgrade found.")
+                        for option_number, (_, recommendation) in enumerate(
+                            one_transfer_df.head(10).iterrows(), start=1
+                        ):
+                            with st.expander(f"Option {option_number}", expanded=option_number <= 3):
+                                display_recommendation = recommendation.copy()
+                                display_recommendation["outgoing_is_starter"] = (
+                                    str(recommendation.get("player_out", "")) in starting_names
+                                )
+                                option_df = format_one_transfer_table(
+                                    pd.DataFrame([display_recommendation])
+                                )
+                                st.dataframe(
+                                    style_table(option_df),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                                if st.button(
+                                    "Apply This Recommendation",
+                                    key=f"apply_one_transfer_{option_number}",
+                                ):
+                                    updated_squad_df, apply_error = apply_transfer_recommendation_to_squad(
+                                        current_squad_df,
+                                        safe_recommendation_pool,
+                                        [str(recommendation.get("player_out", ""))],
+                                        [str(recommendation.get("player_in", ""))],
+                                    )
+                                    if apply_error:
+                                        st.warning(apply_error)
+                                    else:
+                                        queue_applied_squad(
+                                            updated_squad_df,
+                                            float(recommendation.get("remaining_money_in_bank", money_in_bank)),
+                                        )
 
+                if transfer_count == 2 and "transfer_two_recommendations" in st.session_state:
+                    two_transfer_df = st.session_state["transfer_two_recommendations"]
+                    st.markdown('<div class="comparison-banner">Best 2-Transfer Recommendations</div>', unsafe_allow_html=True)
                     if two_transfer_df.empty:
+                        st.info("Transfer Action: No clear transfer upgrade found.")
                         st.info("No valid 2-transfer recommendations were found.")
                     else:
-                        st.dataframe(
-                            style_table(format_two_transfer_table(two_transfer_df.head(20))),
-                            use_container_width=True,
+                        useful_two_transfer = pd.to_numeric(
+                            two_transfer_df["predicted_points_gain"], errors="coerce"
+                        ).gt(0).any()
+                        if useful_two_transfer:
+                            st.success("Transfer Action: Transfer upgrade found.")
+                        else:
+                            st.info("Transfer Action: No clear transfer upgrade found.")
+                        for option_number, (_, recommendation) in enumerate(
+                            two_transfer_df.head(10).iterrows(), start=1
+                        ):
+                            total_gain = pd.to_numeric(
+                                recommendation.get("predicted_points_gain"), errors="coerce"
+                            )
+                            with st.expander(f"Option {option_number}", expanded=option_number <= 3):
+                                if pd.notna(total_gain):
+                                    st.metric("Total Predicted Points Gain", f"{float(total_gain):.2f}")
+                                option_df = build_two_transfer_display(
+                                    recommendation,
+                                    safe_recommendation_pool,
+                                    starting_names,
+                                )
+                                st.dataframe(
+                                    style_table(option_df),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                                selected_transfer_numbers = [
+                                    transfer_number
+                                    for transfer_number in (1, 2)
+                                    if st.checkbox(
+                                        (
+                                            f"Select transfer {transfer_number}: "
+                                            f"{recommendation.get(f'player_out_{transfer_number}', '')} → "
+                                            f"{recommendation.get(f'player_in_{transfer_number}', '')}"
+                                        ),
+                                        key=f"select_two_transfer_{option_number}_{transfer_number}",
+                                    )
+                                ]
+                                apply_full_two = st.button(
+                                    "Apply Full 2-Transfer Option",
+                                    key=f"apply_full_two_transfer_{option_number}",
+                                )
+                                apply_selected_two = st.button(
+                                    "Apply Selected From This Option",
+                                    key=f"apply_selected_two_transfer_{option_number}",
+                                )
+                                if apply_full_two or apply_selected_two:
+                                    if apply_selected_two and not selected_transfer_numbers:
+                                        st.warning("Select at least one transfer before applying selected changes.")
+                                        continue
+                                    transfers_to_apply = (
+                                        [1, 2] if apply_full_two else selected_transfer_numbers
+                                    )
+                                    outgoing_names = [
+                                        str(recommendation.get(f"player_out_{number}", ""))
+                                        for number in transfers_to_apply
+                                    ]
+                                    incoming_names = [
+                                        str(recommendation.get(f"player_in_{number}", ""))
+                                        for number in transfers_to_apply
+                                    ]
+                                    updated_squad_df, apply_error = apply_transfer_recommendation_to_squad(
+                                        current_squad_df,
+                                        safe_recommendation_pool,
+                                        outgoing_names,
+                                        incoming_names,
+                                    )
+                                    if apply_error:
+                                        st.warning(apply_error)
+                                    else:
+                                        updated_bank = float(
+                                            money_in_bank
+                                            + pd.to_numeric(current_squad_df["price_m"], errors="coerce").sum()
+                                            - pd.to_numeric(updated_squad_df["price_m"], errors="coerce").sum()
+                                        )
+                                        queue_applied_squad(
+                                            updated_squad_df,
+                                            updated_bank,
+                                        )
+
+                if transfer_count == "Unlimited" and "transfer_wildcard_squad" in st.session_state:
+                    wildcard_squad_df = st.session_state["transfer_wildcard_squad"]
+                    st.markdown('<div class="comparison-banner">Wildcard Recommendation</div>', unsafe_allow_html=True)
+                    if wildcard_squad_df.empty:
+                        st.info("Transfer Action: No clear wildcard upgrade found.")
+                        st.info("A safe Wildcard recommendation could not be generated from the available predictions.")
+                    else:
+                        wildcard_cost = float(
+                            pd.to_numeric(wildcard_squad_df["price_m"], errors="coerce").sum()
                         )
+                        wildcard_remaining_bank = float(squad_cost + money_in_bank - wildcard_cost)
+                        current_names = set(current_squad_df["name"])
+                        wildcard_names = set(wildcard_squad_df["name"])
+                        players_changed = len(current_names - wildcard_names)
+                        wildcard_gain = float(
+                            pd.to_numeric(wildcard_squad_df["predicted_points"], errors="coerce").sum()
+                            - pd.to_numeric(current_squad_df["predicted_points"], errors="coerce").sum()
+                        )
+
+                        if players_changed > 0:
+                            st.success("Transfer Action: Wildcard changes found.")
+                        else:
+                            st.info(
+                                "Transfer Action: No wildcard changes recommended. Your current squad "
+                                "already matches the model's recommended squad."
+                            )
+
+                        summary_col1, summary_col2, summary_col3 = st.columns(3)
+                        summary_col1.metric("Total Players Changed", players_changed)
+                        summary_col2.metric("Estimated Predicted Points Gain", f"{wildcard_gain:.2f}")
+                        summary_col3.metric("Remaining Money In Bank", f"{wildcard_remaining_bank:.1f}")
+
+                        wildcard_changes_df = build_wildcard_change_display(
+                            current_squad_df=current_squad_df,
+                            wildcard_squad_df=wildcard_squad_df,
+                            starting_names=starting_names,
+                            remaining_bank=wildcard_remaining_bank,
+                        )
+                        if wildcard_changes_df.empty:
+                            st.success("Your current squad already matches the recommended Wildcard squad.")
+                        else:
+                            selected_wildcard_rows: list[int] = []
+                            for change_number, (_, change) in enumerate(
+                                wildcard_changes_df.iterrows(), start=1
+                            ):
+                                if st.checkbox(
+                                    (
+                                        f"Select change {change_number}: {change['Player Out']} → "
+                                        f"{change['Player In']}"
+                                    ),
+                                    key=f"select_wildcard_change_{change_number}",
+                                ):
+                                    selected_wildcard_rows.append(change_number - 1)
+                                st.dataframe(
+                                    style_table(pd.DataFrame([change])),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                            apply_selected_wildcard = st.button(
+                                "Apply Selected Changes",
+                                key="apply_selected_wildcard_changes",
+                            )
+                            apply_all_wildcard = st.button(
+                                "Apply All Changes",
+                                key="apply_all_wildcard_changes",
+                            )
+                            if apply_selected_wildcard or apply_all_wildcard:
+                                if apply_selected_wildcard and not selected_wildcard_rows:
+                                    st.warning("Select at least one Wildcard change before applying selected changes.")
+                                else:
+                                    changes_to_apply = (
+                                        wildcard_changes_df
+                                        if apply_all_wildcard
+                                        else wildcard_changes_df.iloc[selected_wildcard_rows]
+                                    )
+                                    outgoing_names = changes_to_apply["Player Out"].dropna().astype(str).tolist()
+                                    incoming_names = changes_to_apply["Player In"].dropna().astype(str).tolist()
+                                    updated_squad_df, apply_error = apply_transfer_recommendation_to_squad(
+                                        current_squad_df,
+                                        safe_recommendation_pool,
+                                        outgoing_names,
+                                        incoming_names,
+                                    )
+                                    if apply_error:
+                                        st.warning(apply_error)
+                                    else:
+                                        updated_bank = float(
+                                            money_in_bank
+                                            + pd.to_numeric(current_squad_df["price_m"], errors="coerce").sum()
+                                            - pd.to_numeric(updated_squad_df["price_m"], errors="coerce").sum()
+                                        )
+                                        queue_applied_squad(updated_squad_df, updated_bank)
