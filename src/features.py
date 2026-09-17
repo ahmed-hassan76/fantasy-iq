@@ -50,6 +50,8 @@ def build_feature_table(
         ["name", "position", "round"],
         as_index=False
     ).agg({
+        # Zero marks ambiguous IDs without changing existing training dropna behavior.
+        "player_id": lambda ids: ids.iloc[0] if ids.nunique() == 1 else 0,
         "assists": "sum",
         "clean_sheets": "sum",
         "goals_conceded": "sum",
@@ -149,6 +151,7 @@ def split_position_datasets(feature_df: pd.DataFrame, verbose: bool = True) -> d
     fwd_df = feature_df[feature_df["position"] == "FWD"].copy()
 
     passthrough_cols = [
+        "player_id",
         "team_id",
         "team_short_name",
         "status",

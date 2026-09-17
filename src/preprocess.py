@@ -169,6 +169,7 @@ def build_clean_history_table(
         history["value"] = 0.0
 
     required_cols = [
+        "player_id",
         "name",
         "position",
         "team",

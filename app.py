@@ -5,7 +5,9 @@ import html
 import time
 import streamlit as st
 import pandas as pd
-from src.api import clear_api_cache
+from src.api import clear_api_cache, FPLApiError
+from src.prediction_log import (infer_prediction_target_gameweek, build_prediction_log_export,
+                                complete_prediction_log, ActualPointsUnavailable)
 from src.predict import build_predictions_table
 from src.fixture_planner import build_normalized_team_fixtures, build_team_fixture_summary
 from src.optimizer import (
@@ -634,110 +636,34 @@ def format_prediction_table(df: pd.DataFrame) -> pd.DataFrame:
     return temp[existing_cols]
 
 
-def infer_prediction_target_gameweek(df: pd.DataFrame) -> int | None:
-    """Infer the predicted GW without confusing it with the model's source data round."""
-    source_df = df.reset_index(drop=True)
-
-    # target_gameweek is the gameweek being predicted/exported. A target column is
-    # reliable only when every populated row identifies the same valid FPL gameweek.
-    for gameweek_column in (
-        "target_gameweek",
-        "prediction_gameweek",
-        "target_round",
-        "prediction_round",
-        "event",
-        "gameweek",
-        "round",
-    ):
-        if gameweek_column not in source_df.columns:
-            continue
-
-        gameweek_values = pd.to_numeric(source_df[gameweek_column], errors="coerce").dropna().unique()
-        if (
-            len(gameweek_values) == 1
-            and float(gameweek_values[0]).is_integer()
-            and 4 <= int(gameweek_values[0]) <= 38
-        ):
-            return int(gameweek_values[0])
-
-    # source_round is the last available data used by the model, so predictions
-    # made from source round N are for target gameweek N + 1.
-    for source_round_column in (
-        "source_round",
-        "latest_available_source_round",
-        "Latest Available Source Round",
-        "latest_available_round",
-    ):
-        if source_round_column not in source_df.columns:
-            continue
-
-        source_round_values = pd.to_numeric(source_df[source_round_column], errors="coerce").dropna()
-        if not source_round_values.empty:
-            inferred_gameweek = int(source_round_values.max()) + 1
-            if 4 <= inferred_gameweek <= 38:
-                return inferred_gameweek
-
-    return None
-
-
-def build_prediction_log_export(
-    df: pd.DataFrame,
-    target_gameweek: int | None = None,
-) -> tuple[pd.DataFrame, int | None]:
-    source_df = df.reset_index(drop=True).copy()
-
-    def export_values(*column_names: str) -> pd.Series:
-        for column_name in column_names:
-            if column_name in source_df.columns:
-                return source_df[column_name]
-        return pd.Series("", index=source_df.index, dtype="object")
-
-    gameweek = target_gameweek if target_gameweek is not None else infer_prediction_target_gameweek(source_df)
-
-    position_values = export_values("position")
-    model_values = position_values.astype("string").str.upper().map(
-        {
-            "GK": "Linear Regression",
-            "DEF": "Linear Regression",
-            "MID": "Linear Regression",
-            "FWD": "LSTM",
-        }
-    )
-
-    export_df = pd.DataFrame(index=source_df.index)
-    export_df["Gameweek"] = gameweek if gameweek is not None else ""
-    export_df["Export Timestamp"] = datetime.now().astimezone().isoformat(timespec="seconds")
-    export_df["Player Name"] = export_values("name")
-    export_df["Team"] = export_values("team")
-    export_df["Position"] = position_values
-    export_df["Price"] = pd.to_numeric(export_values("price_m"), errors="coerce").round(1)
-    export_df["Predicted Points"] = pd.to_numeric(
-        export_values("predicted_points"), errors="coerce"
-    ).round(2)
-    # Actual points are intentionally blank until the target gameweek finishes;
-    # populating them for a future prediction would introduce data leakage.
-    export_df["Actual Points"] = ""
-    export_df["Error (Actual - Predicted)"] = ""
-    export_df["Absolute Error"] = ""
-    export_df["Squared Error"] = ""
-    export_df["Risk Level"] = export_values("risk_level")
-    export_df["Risk Flags"] = export_values("risk_flags")
-    export_df["Next 3 FDR Avg"] = pd.to_numeric(
-        export_values("next_3_fdr_avg"), errors="coerce"
-    ).round(2)
-    export_df["Next 5 FDR Avg"] = pd.to_numeric(
-        export_values("next_5_fdr_avg"), errors="coerce"
-    ).round(2)
-    export_df["Model Used"] = model_values.fillna("")
-    export_df["Latest Available Source Round"] = export_values(
-        "source_round",
-        "latest_available_source_round",
-        "latest_available_round",
-        "round",
-    )
-    export_df["Notes"] = ""
-
-    return export_df, gameweek
+def render_previous_prediction_log() -> None:
+    with st.expander("Complete Previous Prediction Log"):
+        st.caption("Upload a saved pre-deadline Prediction Log from the current FPL season. Only official completed and checked gameweeks can be filled. Original predictions are preserved.")
+        uploaded = st.file_uploader("Previous Prediction Log CSV", type=["csv"], key="previous_prediction_log")
+        if uploaded is not None:
+            try:
+                # Read as strings so original prediction precision and other fields survive unchanged.
+                snapshot = pd.read_csv(uploaded, dtype=str, keep_default_na=False)
+                st.dataframe(snapshot, use_container_width=True)
+                if st.button("Fetch Official Actual Points", key="complete_prediction_log"):
+                    with st.spinner("Fetching official FPL points..."):
+                        completed, gameweek, unmatched = complete_prediction_log(snapshot)
+                    st.session_state["completed_prediction_log"] = (
+                        uploaded.getvalue(), completed, gameweek, unmatched
+                    )
+                saved = st.session_state.get("completed_prediction_log")
+                if saved is not None and saved[0] == uploaded.getvalue():
+                    _, completed, gameweek, unmatched = saved
+                    if unmatched:
+                        st.warning(f"{unmatched} player(s) could not be matched safely or have no official points. Their actuals and errors remain blank.")
+                    else:
+                        st.success(f"GW{gameweek} completed using official FPL points.")
+                    st.dataframe(completed, use_container_width=True)
+                    st.download_button("Download Completed Prediction Log CSV", completed.to_csv(index=False).encode("utf-8-sig"), file_name=f"fantasy_iq_prediction_log_GW{gameweek}_completed.csv", mime="text/csv", key="completed_prediction_log_csv")
+            except (ActualPointsUnavailable, FPLApiError) as exc:
+                st.info(str(exc))
+            except (ValueError, pd.errors.ParserError, UnicodeError) as exc:
+                st.error(f"Unable to complete this prediction log: {exc}")
 
 
 def render_prediction_results_header(
@@ -1905,6 +1831,8 @@ elif page == "Player Prediction Engine":
         "View live predicted points for players"
     )
 
+    render_previous_prediction_log()
+
     predictions_df = load_predictions_with_ui()
 
     if predictions_df.empty:
@@ -1915,22 +1843,13 @@ elif page == "Player Prediction Engine":
     inferred_target_gameweek = infer_prediction_target_gameweek(predictions_df)
     if inferred_target_gameweek is None:
         render_prediction_results_header(predictions_df.iloc[0:0])
-        st.error("No valid prediction target is available. Predictions begin from GW4.")
+        st.error("No valid next gameweek is available from the source data (supported targets: GW1 to GW38).")
         st.stop()
 
-    # Only gameweeks represented by current prediction data are selectable. The
-    # app does not present empty or unsupported gameweeks as viewable predictions.
-    target_gameweek_options = [inferred_target_gameweek]
-    selected_target_gameweek = st.selectbox(
-        "Prediction Target Gameweek",
-        target_gameweek_options,
-        format_func=lambda gameweek: f"GW{gameweek}",
-        key="prediction_target_gameweek",
-    )
-    st.caption(
-        "The selected gameweek labels the current prediction export. Historical pre-deadline "
-        "predictions can only be reviewed if they were saved/exported earlier."
-    )
+    predictions_df.attrs["latest_source_round"] = inferred_target_gameweek - 1
+    selected_target_gameweek = inferred_target_gameweek
+    st.info(f"Prediction Target Gameweek: GW{selected_target_gameweek} (latest source round + 1)")
+    st.caption("Historical predictions are available only from previously saved snapshots.")
 
     section_box_title("Filters", "Filter players by position, team, price, and predicted points")
 

@@ -282,3 +282,12 @@ def get_base_fpl_tables(use_cache: bool = True) -> dict[str, pd.DataFrame]:
         "events": events_df,
         "fixtures": fixtures_df,
     }
+
+def fetch_gameweek_live(gameweek: int) -> dict[str, Any]:
+    """Fetch official per-player event totals without a stale-cache fallback."""
+    from src.constants import FPL_BASE_URL
+
+    payload = _get_json(f"{FPL_BASE_URL}/event/{gameweek}/live/", use_cache=False)
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        raise FPLApiError("Official gameweek points are not available yet.")
+    return payload
